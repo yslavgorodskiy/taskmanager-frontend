@@ -15,10 +15,11 @@ function DirectionForm({
   onCancel: () => void
 }) {
   const queryClient = useQueryClient()
+  const [color, setColor] = useState(direction?.color ?? '#6366f1')
+
   const { register, handleSubmit, formState: { errors, isSubmitting } } = useForm<DirectionCreate>({
     defaultValues: {
       name: direction?.name ?? '',
-      color: direction?.color ?? '',
     },
   })
 
@@ -34,7 +35,7 @@ function DirectionForm({
   })
 
   const onSubmit = async (data: DirectionCreate) => {
-    const payload = { name: data.name, color: data.color || undefined }
+    const payload = { name: data.name, color: color || undefined }
     if (direction) {
       await updateMutation.mutateAsync({ id: direction.id, data: payload })
     } else {
@@ -58,11 +59,14 @@ function DirectionForm({
         <div className="flex items-center gap-3">
           <input
             type="color"
-            {...register('color')}
-            className="h-10 w-16 border border-slate-300 rounded-lg cursor-pointer"
+            value={color}
+            onChange={(e) => setColor(e.target.value)}
+            className="w-10 h-10 rounded-lg border border-slate-300 cursor-pointer flex-shrink-0 p-0.5"
           />
           <input
-            {...register('color')}
+            type="text"
+            value={color}
+            onChange={(e) => setColor(e.target.value)}
             className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
             placeholder="#6366f1"
           />
