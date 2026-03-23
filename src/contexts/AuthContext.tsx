@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import { authApi } from '../api/auth'
 import type { User, LoginRequest, RegisterRequest } from '../types'
 
@@ -18,6 +19,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined)
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null)
   const [isLoading, setIsLoading] = useState(true)
+  const queryClient = useQueryClient()
 
   useEffect(() => {
     const token = localStorage.getItem('access_token')
@@ -40,6 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const tokens = await authApi.login(data)
     localStorage.setItem('access_token', tokens.access_token)
     localStorage.setItem('refresh_token', tokens.refresh_token)
+    queryClient.clear()
     const me = await authApi.getMe()
     setUser(me)
   }
@@ -52,6 +55,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = () => {
     localStorage.removeItem('access_token')
     localStorage.removeItem('refresh_token')
+    queryClient.clear()
     setUser(null)
   }
 
