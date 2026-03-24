@@ -1,17 +1,18 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm, Controller } from 'react-hook-form'
 import { tasksApi } from '../api/tasks'
 import { directionsApi } from '../api/directions'
 import { tagsApi } from '../api/tags'
 import { usersApi } from '../api/users'
-import type { Task, TaskCreate, TaskStatus, TaskPriority, TaskUpdate, ColumnSettings } from '../types'
+import type { Task, TaskCreate, TaskStatus, TaskPriority, TaskUpdate, ColumnSettings, Direction, Tag } from '../types'
 import Modal from '../components/Modal'
+
+// ─── Column types ────────────────────────────────────────────────────────────
 
 type ColumnKey = 'title' | 'status' | 'priority' | 'direction' | 'due_date'
 type SortKey = ColumnKey
 type SortOrder = 'asc' | 'desc'
-
 type ColumnWidths = ColumnSettings['widths']
 
 const COLUMNS: { key: ColumnKey; label: string }[] = [
@@ -23,7 +24,6 @@ const COLUMNS: { key: ColumnKey; label: string }[] = [
 ]
 
 const ALL_COLUMN_KEYS: ColumnKey[] = COLUMNS.map((c) => c.key)
-
 const DEFAULT_SETTINGS: ColumnSettings = { visible: ['title'], widths: {} }
 
 function colFixedWidth(key: ColumnKey, widths: ColumnWidths): number | undefined {
@@ -36,6 +36,207 @@ function colFixedWidth(key: ColumnKey, widths: ColumnWidths): number | undefined
 
 const STATUS_ORDER: Record<TaskStatus, number> = { new: 0, in_progress: 1, completed: 2, cancelled: 3 }
 const PRIORITY_ORDER: Record<TaskPriority, number> = { low: 0, medium: 1, high: 2, urgent: 3 }
+
+// ─── Advanced filter types ───────────────────────────────────────────────────
+
+type FilterFieldType = 'string' | 'enum' | 'relation' | 'date'
+
+interface FilterFieldDef {
+  key: string
+  label: string
+  type: FilterFieldType
+  options?: { value: string; label: string }[]
+}
+
+type FilterOp = 'contains' | 'not_contains' | 'equals' | 'not_equals' | 'empty' | 'not_empty' | 'before' | 'after'
+
+interface FilterRule {
+  field: string
+  op: FilterOp
+  value: string
+}
+
+const OPS_BY_TYPE: Record<FilterFieldType, { value: FilterOp; label: string }[]> = {
+  string: [
+    { value: 'contains', label: 'містить' },
+    { value: 'not_contains', label: 'не містить' },
+    { value: 'equals', label: 'дорівнює' },
+    { value: 'not_equals', label: 'не дорівнює' },
+    { value: 'empty', label: 'порожнє' },
+    { value: 'not_empty', label: 'не порожнє' },
+  ],
+  enum: [
+    { value: 'equals', label: 'дорівнює' },
+    { value: 'not_equals', label: 'не дорівнює' },
+  ],
+  relation: [
+    { value: 'equals', label: 'дорівнює' },
+    { value: 'not_equals', label: 'не дорівнює' },
+    { value: 'empty', label: 'порожнє' },
+    { value: 'not_empty', label: 'не порожнє' },
+  ],
+  date: [
+    { value: 'equals', label: 'дорівнює' },
+    { value: 'before', label: 'до' },
+    { value: 'after', label: 'після' },
+    { value: 'empty', label: 'порожнє' },
+    { value: 'not_empty', label: 'не порожнє' },
+  ],
+}
+
+const NO_VALUE_OPS: FilterOp[] = ['empty', 'not_empty']
+
+const DATE_PRESETS: { value: string; label: string }[] = [
+  { value: '$today', label: 'Поточна дата' },
+  { value: '$week_start', label: 'Початок цього тижня' },
+  { value: '$month_start', label: 'Початок цього місяця' },
+  { value: '$year_start', label: 'Початок цього року' },
+]
+
+function resolveDateValue(value: string): string {
+  const now = new Date()
+  switch (value) {
+    case '$today':
+      return now.toISOString().split('T')[0]
+    case '$week_start': {
+      const d = new Date(now)
+      const day = d.getDay()
+      d.setDate(d.getDate() - (day === 0 ? 6 : day - 1)) // Monday
+      return d.toISOString().split('T')[0]
+    }
+    case '$month_start':
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+    case '$year_start':
+      return `${now.getFullYear()}-01-01`
+    default:
+      return value
+  }
+}
+
+function getTaskFieldValue(task: Task, fieldKey: string): string | null {
+  switch (fieldKey) {
+    case 'title': return task.title
+    case 'description': return task.description ?? null
+    case 'status': return task.status
+    case 'priority': return task.priority
+    case 'direction': return task.direction?.name ?? null
+    case 'direction_id': return task.direction ? String(task.direction.id) : null
+    case 'due_date': return task.due_date ? task.due_date.split('T')[0] : null
+    default: return null
+  }
+}
+
+function evalFilterRule(task: Task, rule: FilterRule, fieldDef: FilterFieldDef): boolean {
+  const valKey = fieldDef.type === 'relation' && (rule.op === 'equals' || rule.op === 'not_equals')
+    ? fieldDef.key + '_id'
+    : fieldDef.key
+  const raw = getTaskFieldValue(task, valKey)
+  const ruleValue = fieldDef.type === 'date' ? resolveDateValue(rule.value) : rule.value
+
+  switch (rule.op) {
+    case 'empty': return raw === null || raw === ''
+    case 'not_empty': return raw !== null && raw !== ''
+    case 'contains': return (raw ?? '').toLowerCase().includes(ruleValue.toLowerCase())
+    case 'not_contains': return !(raw ?? '').toLowerCase().includes(ruleValue.toLowerCase())
+    case 'equals':
+      if (fieldDef.type === 'relation') return raw === ruleValue
+      return (raw ?? '') === ruleValue
+    case 'not_equals':
+      if (fieldDef.type === 'relation') return raw !== ruleValue
+      return (raw ?? '') !== ruleValue
+    case 'before': return raw != null && raw < ruleValue
+    case 'after': return raw != null && raw > ruleValue
+  }
+}
+
+// ─── Expression parser for "(1 та 2) або 3" ─────────────────────────────────
+
+type ExprNode = { type: 'ref'; index: number }
+  | { type: 'and'; left: ExprNode; right: ExprNode }
+  | { type: 'or'; left: ExprNode; right: ExprNode }
+
+function parseFilterExpression(expr: string): ExprNode | null {
+  const tokens: string[] = []
+  const re = /\(|\)|\d+|та|або|and|or/gi
+  let m: RegExpExecArray | null
+  while ((m = re.exec(expr)) !== null) tokens.push(m[0])
+  if (tokens.length === 0) return null
+
+  let pos = 0
+
+  function peek() { return tokens[pos] }
+  function consume() { return tokens[pos++] }
+
+  function parseExpr(): ExprNode | null {
+    let left = parseTerm()
+    if (!left) return null
+    while (peek() === 'або' || peek()?.toLowerCase() === 'or') {
+      consume()
+      const right = parseTerm()
+      if (!right) return null
+      left = { type: 'or', left, right }
+    }
+    return left
+  }
+
+  function parseTerm(): ExprNode | null {
+    let left = parsePrimary()
+    if (!left) return null
+    while (peek() === 'та' || peek()?.toLowerCase() === 'and') {
+      consume()
+      const right = parsePrimary()
+      if (!right) return null
+      left = { type: 'and', left, right }
+    }
+    return left
+  }
+
+  function parsePrimary(): ExprNode | null {
+    const t = peek()
+    if (!t) return null
+    if (t === '(') {
+      consume()
+      const node = parseExpr()
+      if (peek() === ')') consume()
+      return node
+    }
+    if (/^\d+$/.test(t)) {
+      consume()
+      return { type: 'ref', index: Number(t) }
+    }
+    return null
+  }
+
+  return parseExpr()
+}
+
+function evalExpr(node: ExprNode, results: Map<number, boolean>): boolean {
+  switch (node.type) {
+    case 'ref': return results.get(node.index) ?? true
+    case 'and': return evalExpr(node.left, results) && evalExpr(node.right, results)
+    case 'or': return evalExpr(node.left, results) || evalExpr(node.right, results)
+  }
+}
+
+function applyAdvancedFilters(
+  task: Task,
+  filters: FilterRule[],
+  expression: string,
+  fieldDefs: FilterFieldDef[],
+): boolean {
+  if (filters.length === 0) return true
+  const defMap = new Map(fieldDefs.map((d) => [d.key, d]))
+  const results = new Map<number, boolean>()
+  filters.forEach((f, i) => {
+    const fd = defMap.get(f.field)
+    results.set(i + 1, fd ? evalFilterRule(task, f, fd) : true)
+  })
+  const ast = parseFilterExpression(expression.trim())
+  if (ast) return evalExpr(ast, results)
+  // Default: AND all filters
+  for (const v of results.values()) if (!v) return false
+  return true
+}
 
 // Ukrainian labels
 const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
@@ -250,15 +451,28 @@ export default function TasksPage() {
     },
   })
 
+  // Advanced filters
+  const [advancedFilters, setAdvancedFilters] = useState<FilterRule[]>([])
+  const [filterExpression, setFilterExpression] = useState('')
+
+  // Settings modal state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [settingsTab, setSettingsTab] = useState<'fields' | 'filters'>('fields')
   const [draftVisible, setDraftVisible] = useState<ColumnKey[]>([])
   const [draftWidths, setDraftWidths] = useState<ColumnWidths>({})
+  const [draftFilters, setDraftFilters] = useState<FilterRule[]>([])
+  const [draftExpression, setDraftExpression] = useState('')
 
-  const openSettings = () => {
+  const openSettings = (tab: 'fields' | 'filters' = 'fields') => {
     setDraftVisible([...columnSettings.visible] as ColumnKey[])
     setDraftWidths(structuredClone(columnSettings.widths))
+    setDraftFilters(advancedFilters.map((f) => ({ ...f })))
+    setDraftExpression(filterExpression)
+    setSettingsTab(tab)
     setIsSettingsOpen(true)
   }
+
+  const openSettingsFilters = () => openSettings('filters')
 
   const toggleDraftColumn = (key: ColumnKey) => {
     setDraftVisible((prev) =>
@@ -275,10 +489,93 @@ export default function TasksPage() {
     })
   }
 
+  const addDraftFilter = () => {
+    const newIndex = draftFilters.length + 1
+    setDraftFilters([...draftFilters, { field: 'title', op: 'contains', value: '' }])
+    const trimmed = draftExpression.trim()
+    if (newIndex === 1 || trimmed === '') {
+      setDraftExpression(String(newIndex))
+    } else {
+      setDraftExpression(`${trimmed} та ${newIndex}`)
+    }
+  }
+
+  const updateDraftFilter = (idx: number, patch: Partial<FilterRule>) => {
+    setDraftFilters((prev) => prev.map((f, i) => {
+      if (i !== idx) return f
+      const updated = { ...f, ...patch }
+      // Reset op/value when field type changes
+      if (patch.field && patch.field !== f.field) {
+        const newDef = FILTER_FIELDS.find((d) => d.key === patch.field)
+        const ops = newDef ? OPS_BY_TYPE[newDef.type] : []
+        updated.op = ops[0]?.value ?? 'equals'
+        updated.value = ''
+      }
+      // Reset value when switching to empty/not_empty
+      if (patch.op && NO_VALUE_OPS.includes(patch.op)) {
+        updated.value = ''
+      }
+      return updated
+    }))
+  }
+
+  const removeDraftFilter = (idx: number) => {
+    const removedNum = idx + 1
+    const next = draftFilters.filter((_, i) => i !== idx)
+    setDraftFilters(next)
+
+    if (next.length === 0) {
+      setDraftExpression('')
+    } else if (next.length === 1) {
+      setDraftExpression('1')
+    } else {
+      // Tokenize expression, remove the deleted number + its adjacent operator, renumber
+      const tokens: string[] = []
+      const re = /\(|\)|\d+|та|або|and|or/gi
+      let m: RegExpExecArray | null
+      while ((m = re.exec(draftExpression)) !== null) tokens.push(m[0])
+
+      // Find and remove the token for removedNum
+      const numIdx = tokens.findIndex((t) => t === String(removedNum))
+      if (numIdx !== -1) {
+        // Remove adjacent operator (prefer the one before, fallback to after)
+        const isOp = (t: string) => /^(та|або|and|or)$/i.test(t)
+        if (numIdx > 0 && isOp(tokens[numIdx - 1])) {
+          tokens.splice(numIdx - 1, 2) // remove operator + number
+        } else if (numIdx < tokens.length - 1 && isOp(tokens[numIdx + 1])) {
+          tokens.splice(numIdx, 2) // remove number + operator
+        } else {
+          tokens.splice(numIdx, 1) // remove just the number
+        }
+      }
+
+      // Clean up empty parens: ( ) → remove both
+      for (let i = tokens.length - 1; i >= 1; i--) {
+        if (tokens[i] === ')' && tokens[i - 1] === '(') {
+          tokens.splice(i - 1, 2)
+          i--
+        }
+      }
+
+      // Renumber: shift all numbers > removedNum down by 1
+      const result = tokens.map((t) => {
+        if (/^\d+$/.test(t)) {
+          const n = Number(t)
+          return n > removedNum ? String(n - 1) : t
+        }
+        return t
+      }).join(' ')
+
+      setDraftExpression(result)
+    }
+  }
+
   const applySettings = () => {
     const visible = draftVisible.length > 0 ? draftVisible : [...ALL_COLUMN_KEYS]
     const next: ColumnSettings = { visible, widths: draftWidths }
     saveMutation.mutate(next)
+    setAdvancedFilters(draftFilters)
+    setFilterExpression(draftExpression)
     setIsSettingsOpen(false)
   }
 
@@ -301,8 +598,6 @@ export default function TasksPage() {
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('')
-  const [selectedDirectionIds, setSelectedDirectionIds] = useState<number[]>([])
-  const [selectedStatuses, setSelectedStatuses] = useState<TaskStatus[]>([])
 
   const { data: tasks = [], isLoading } = useQuery({
     queryKey: ['tasks'],
@@ -314,31 +609,72 @@ export default function TasksPage() {
     queryFn: directionsApi.getDirections,
   })
 
+  const FILTER_FIELDS: FilterFieldDef[] = useMemo(() => [
+    { key: 'title', label: 'Назва', type: 'string' },
+    { key: 'description', label: 'Опис', type: 'string' },
+    { key: 'status', label: 'Статус', type: 'enum', options: STATUS_OPTIONS.map((o) => ({ value: o.value, label: o.label })) },
+    { key: 'priority', label: 'Пріоритет', type: 'enum', options: PRIORITY_OPTIONS.map((o) => ({ value: o.value, label: o.label })) },
+    { key: 'direction', label: 'Напрямок', type: 'relation', options: directions.map((d) => ({ value: String(d.id), label: d.name })) },
+    { key: 'due_date', label: 'Дедлайн', type: 'date' },
+  ], [directions])
+
   const deleteMutation = useMutation({
     mutationFn: tasksApi.deleteTask,
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['tasks'] }); setDeletingId(null) },
   })
 
-  const toggleDirection = (id: number) => {
-    setSelectedDirectionIds((prev) =>
-      prev.includes(id) ? prev.filter((d) => d !== id) : [...prev, id]
+  const rebuildExpression = (filters: FilterRule[]) => {
+    if (filters.length === 0) return ''
+    if (filters.length === 1) return '1'
+    // Group same-field filters with "або", connect different groups with "та"
+    const groups: number[][] = []
+    const fieldToGroup = new Map<string, number>()
+    filters.forEach((f, i) => {
+      const existing = fieldToGroup.get(f.field)
+      if (existing !== undefined) {
+        groups[existing].push(i + 1)
+      } else {
+        fieldToGroup.set(f.field, groups.length)
+        groups.push([i + 1])
+      }
+    })
+    const parts = groups.map((nums) => {
+      const inner = nums.join(' або ')
+      return nums.length > 1 && groups.length > 1 ? `(${inner})` : inner
+    })
+    return parts.join(' та ')
+  }
+
+  const addOrRemoveSidebarFilter = (field: string, op: FilterOp, value: string) => {
+    const existingIdx = advancedFilters.findIndex(
+      (f) => f.field === field && f.op === op && f.value === value
     )
+    if (existingIdx !== -1) {
+      const next = advancedFilters.filter((_, i) => i !== existingIdx)
+      setAdvancedFilters(next)
+      setFilterExpression(rebuildExpression(next))
+    } else {
+      const next = [...advancedFilters, { field, op, value }]
+      setAdvancedFilters(next)
+      setFilterExpression(rebuildExpression(next))
+    }
+  }
+
+  const toggleDirection = (id: number) => {
+    addOrRemoveSidebarFilter('direction', 'equals', String(id))
   }
 
   const toggleStatus = (status: TaskStatus) => {
-    setSelectedStatuses((prev) =>
-      prev.includes(status) ? prev.filter((s) => s !== status) : [...prev, status]
-    )
+    addOrRemoveSidebarFilter('status', 'equals', status)
   }
 
   const filteredTasks = useMemo(() => {
     const filtered = tasks.filter((task) => {
-      if (selectedDirectionIds.length > 0 && !selectedDirectionIds.includes(task.direction?.id ?? -1)) return false
-      if (selectedStatuses.length > 0 && !selectedStatuses.includes(task.status)) return false
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase()
         if (!task.title.toLowerCase().includes(q) && !(task.description ?? '').toLowerCase().includes(q)) return false
       }
+      if (!applyAdvancedFilters(task, advancedFilters, filterExpression, FILTER_FIELDS)) return false
       return true
     })
 
@@ -370,14 +706,14 @@ export default function TasksPage() {
     })
 
     return sorted
-  }, [tasks, selectedDirectionIds, selectedStatuses, searchQuery, sortKey, sortOrder])
+  }, [tasks, searchQuery, sortKey, sortOrder, advancedFilters, filterExpression, FILTER_FIELDS])
 
-  const activeFiltersCount = (selectedDirectionIds.length > 0 ? 1 : 0) + (selectedStatuses.length > 0 ? 1 : 0)
+  const activeFiltersCount = advancedFilters.length
 
   const clearAllFilters = () => {
-    setSelectedDirectionIds([])
-    setSelectedStatuses([])
     setSearchQuery('')
+    setAdvancedFilters([])
+    setFilterExpression('')
   }
 
   return (
@@ -396,7 +732,7 @@ export default function TasksPage() {
                   <label key={dir.id} className="flex items-center gap-2.5 cursor-pointer group">
                     <input
                       type="checkbox"
-                      checked={selectedDirectionIds.includes(dir.id)}
+                      checked={advancedFilters.some((f) => f.field === 'direction' && f.op === 'equals' && f.value === String(dir.id))}
                       onChange={() => toggleDirection(dir.id)}
                       className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                     />
@@ -420,7 +756,7 @@ export default function TasksPage() {
                 <label key={opt.value} className="flex items-center gap-2.5 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={selectedStatuses.includes(opt.value)}
+                    checked={advancedFilters.some((f) => f.field === 'status' && f.op === 'equals' && f.value === opt.value)}
                     onChange={() => toggleStatus(opt.value)}
                     className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
                   />
@@ -473,28 +809,36 @@ export default function TasksPage() {
           </div>
 
           <div className="flex items-center gap-2 ml-auto">
-            {/* View toggle */}
-            <div className="flex items-center border border-slate-200 rounded-md overflow-hidden text-xs">
-              <button className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 text-indigo-700 font-medium border-r border-slate-200">
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 6h18M3 14h18M3 18h18" />
-                </svg>
-                Таблиця
-              </button>
-            </div>
-
-            {/* Active filters badge */}
-            {activeFiltersCount > 0 && (
+            {/* Filter button */}
+            <div className="flex items-center gap-1">
               <button
-                onClick={clearAllFilters}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-100 text-violet-700 rounded-md text-xs font-medium hover:bg-violet-200 transition-colors"
+                onClick={openSettingsFilters}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  activeFiltersCount > 0
+                    ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                }`}
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z" />
                 </svg>
-                {activeFiltersCount} {activeFiltersCount === 1 ? 'фільтр' : 'фільтри'}
+                Фільтри
+                {activeFiltersCount > 0 && (
+                  <span className="ml-0.5 px-1.5 py-0.5 bg-indigo-600 text-white rounded-full text-[10px] leading-none">{activeFiltersCount}</span>
+                )}
               </button>
-            )}
+              {activeFiltersCount > 0 && (
+                <button
+                  onClick={clearAllFilters}
+                  title="Скинути всі фільтри"
+                  className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              )}
+            </div>
 
             {/* Record count */}
             <span className="text-xs text-slate-400 whitespace-nowrap">
@@ -503,7 +847,7 @@ export default function TasksPage() {
             </span>
 
             {/* Settings */}
-            <button onClick={openSettings} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors">
+            <button onClick={() => openSettings('fields')} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors">
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -706,50 +1050,192 @@ export default function TasksPage() {
         </div>
       </Modal>
 
-      {/* Column Settings Modal */}
-      <Modal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title="Налаштування стовпців" size="md">
-        <p className="text-sm text-slate-500 mb-4">Оберіть, які стовпці відображати, та вкажіть їхню ширину (px).</p>
-        <div className="space-y-1">
-          {/* Header */}
-          <div className="grid grid-cols-[auto_1fr_80px_80px] gap-3 px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">
-            <div className="w-4" />
-            <div>Стовпець</div>
-            <div>Мін</div>
-            <div>Макс</div>
-          </div>
-          {COLUMNS.map((col) => {
-            const enabled = draftVisible.includes(col.key)
-            return (
-              <div key={col.key} className="grid grid-cols-[auto_1fr_80px_80px] gap-3 items-center px-3 py-2 rounded-lg hover:bg-slate-50 transition-colors">
-                <input
-                  type="checkbox"
-                  checked={enabled}
-                  onChange={() => toggleDraftColumn(col.key)}
-                  className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
-                />
-                <span className={`text-sm ${enabled ? 'text-slate-700' : 'text-slate-400'}`}>{col.label}</span>
-                <input
-                  type="number"
-                  min={0}
-                  placeholder="—"
-                  value={draftWidths[col.key]?.minWidth ?? ''}
-                  onChange={(e) => setDraftWidth(col.key, 'minWidth', e.target.value)}
-                  disabled={!enabled}
-                  className="w-full px-2 py-1 border border-slate-200 rounded text-sm text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-50 disabled:text-slate-300"
-                />
-                <input
-                  type="number"
-                  min={0}
-                  placeholder="—"
-                  value={draftWidths[col.key]?.maxWidth ?? ''}
-                  onChange={(e) => setDraftWidth(col.key, 'maxWidth', e.target.value)}
-                  disabled={!enabled}
-                  className="w-full px-2 py-1 border border-slate-200 rounded text-sm text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-50 disabled:text-slate-300"
-                />
+      {/* Settings Modal */}
+      <Modal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title="Налаштування" size="xl">
+        <div className="flex gap-6 min-h-[400px]">
+          {/* Vertical tabs */}
+          <nav className="flex flex-col gap-1 w-36 flex-shrink-0 border-r border-slate-100 pr-4">
+            {([
+              { id: 'fields' as const, label: 'Поля' },
+              { id: 'filters' as const, label: 'Фільтри' },
+            ]).map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setSettingsTab(tab.id)}
+                className={`text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  settingsTab === tab.id
+                    ? 'bg-indigo-50 text-indigo-700'
+                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-800'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
+
+          {/* Tab content */}
+          <div className="flex-1 min-w-0">
+            {/* ── Поля tab ── */}
+            {settingsTab === 'fields' && (
+              <div>
+                <p className="text-sm text-slate-500 mb-4">Оберіть, які стовпці відображати, та вкажіть їхню ширину (px).</p>
+                <div className="space-y-1">
+                  <div className="grid grid-cols-[auto_1fr_80px_80px] gap-3 px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                    <div className="w-4" />
+                    <div>Стовпець</div>
+                    <div>Мін</div>
+                    <div>Макс</div>
+                  </div>
+                  {COLUMNS.map((col) => {
+                    const enabled = draftVisible.includes(col.key)
+                    return (
+                      <div key={col.key} className="grid grid-cols-[auto_1fr_80px_80px] gap-3 items-center px-3 py-2 rounded-lg hover:bg-slate-50 transition-colors">
+                        <input type="checkbox" checked={enabled} onChange={() => toggleDraftColumn(col.key)} className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer" />
+                        <span className={`text-sm ${enabled ? 'text-slate-700' : 'text-slate-400'}`}>{col.label}</span>
+                        <input type="number" min={0} placeholder="—" value={draftWidths[col.key]?.minWidth ?? ''} onChange={(e) => setDraftWidth(col.key, 'minWidth', e.target.value)} disabled={!enabled} className="w-full px-2 py-1 border border-slate-200 rounded text-sm text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-50 disabled:text-slate-300" />
+                        <input type="number" min={0} placeholder="—" value={draftWidths[col.key]?.maxWidth ?? ''} onChange={(e) => setDraftWidth(col.key, 'maxWidth', e.target.value)} disabled={!enabled} className="w-full px-2 py-1 border border-slate-200 rounded text-sm text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-50 disabled:text-slate-300" />
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
-            )
-          })}
+            )}
+
+            {/* ── Фільтри tab ── */}
+            {settingsTab === 'filters' && (
+              <div>
+                <p className="text-sm text-slate-500 mb-4">Додайте фільтри та вкажіть вираз для їх комбінування (напр. <code className="bg-slate-100 px-1 rounded">(1 та 2) або 3</code>).</p>
+
+                {/* Filter list */}
+                <div className="space-y-2 mb-4">
+                  {draftFilters.length === 0 && (
+                    <p className="text-xs text-slate-400 italic py-4 text-center">Фільтри не додано</p>
+                  )}
+                  {draftFilters.map((filter, idx) => {
+                    const fieldDef = FILTER_FIELDS.find((f) => f.key === filter.field)
+                    const ops = fieldDef ? OPS_BY_TYPE[fieldDef.type] : []
+                    const needsValue = !NO_VALUE_OPS.includes(filter.op)
+                    return (
+                      <div key={idx} className="flex items-center gap-2">
+                        {/* Number */}
+                        <span className="w-6 h-6 flex items-center justify-center rounded-full bg-indigo-100 text-indigo-700 text-xs font-bold flex-shrink-0">
+                          {idx + 1}
+                        </span>
+
+                        {/* Field */}
+                        <select
+                          value={filter.field}
+                          onChange={(e) => updateDraftFilter(idx, { field: e.target.value })}
+                          className="px-2 py-1.5 border border-slate-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        >
+                          {FILTER_FIELDS.map((f) => (
+                            <option key={f.key} value={f.key}>{f.label}</option>
+                          ))}
+                        </select>
+
+                        {/* Operator */}
+                        <select
+                          value={filter.op}
+                          onChange={(e) => updateDraftFilter(idx, { op: e.target.value as FilterOp })}
+                          className="px-2 py-1.5 border border-slate-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                        >
+                          {ops.map((o) => (
+                            <option key={o.value} value={o.value}>{o.label}</option>
+                          ))}
+                        </select>
+
+                        {/* Value */}
+                        {needsValue && (
+                          fieldDef?.options ? (
+                            <select
+                              value={filter.value}
+                              onChange={(e) => updateDraftFilter(idx, { value: e.target.value })}
+                              className="flex-1 px-2 py-1.5 border border-slate-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                            >
+                              <option value="">— оберіть —</option>
+                              {fieldDef.options.map((o) => (
+                                <option key={o.value} value={o.value}>{o.label}</option>
+                              ))}
+                            </select>
+                          ) : fieldDef?.type === 'date' ? (
+                            <div className="flex flex-1 gap-1.5">
+                              <select
+                                value={DATE_PRESETS.some((p) => p.value === filter.value) ? filter.value : '$custom'}
+                                onChange={(e) => updateDraftFilter(idx, { value: e.target.value === '$custom' ? '' : e.target.value })}
+                                className="px-2 py-1.5 border border-slate-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                              >
+                                {DATE_PRESETS.map((p) => (
+                                  <option key={p.value} value={p.value}>{p.label}</option>
+                                ))}
+                                <option value="$custom">Вказати дату...</option>
+                              </select>
+                              {!DATE_PRESETS.some((p) => p.value === filter.value) && (
+                                <input
+                                  type="date"
+                                  value={filter.value}
+                                  onChange={(e) => updateDraftFilter(idx, { value: e.target.value })}
+                                  className="flex-1 px-2 py-1.5 border border-slate-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                />
+                              )}
+                            </div>
+                          ) : (
+                            <input
+                              type="text"
+                              value={filter.value}
+                              onChange={(e) => updateDraftFilter(idx, { value: e.target.value })}
+                              placeholder="Значення"
+                              className="flex-1 px-2 py-1.5 border border-slate-200 rounded text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                            />
+                          )
+                        )}
+
+                        {/* Remove */}
+                        <button
+                          onClick={() => removeDraftFilter(idx)}
+                          className="p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors flex-shrink-0"
+                        >
+                          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* Add filter button */}
+                <button
+                  onClick={addDraftFilter}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                  </svg>
+                  Додати фільтр
+                </button>
+
+                {/* Expression */}
+                {draftFilters.length > 1 && (
+                  <div className="mt-4 pt-4 border-t border-slate-100">
+                    <label className="block text-sm font-medium text-slate-700 mb-1">Вираз фільтрації</label>
+                    <input
+                      type="text"
+                      value={draftExpression}
+                      onChange={(e) => setDraftExpression(e.target.value)}
+                      placeholder={`напр. (1 та 2) або ${draftFilters.length}`}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                    <p className="mt-1 text-xs text-slate-400">
+                      Використовуйте номери фільтрів, <b>та</b>/<b>and</b>, <b>або</b>/<b>or</b> і дужки. Без виразу всі фільтри об'єднуються через «та».
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* Footer */}
         <div className="flex justify-end gap-3 pt-4 mt-4 border-t border-slate-100">
           <button
             onClick={() => setIsSettingsOpen(false)}
