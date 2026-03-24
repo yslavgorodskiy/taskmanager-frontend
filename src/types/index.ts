@@ -146,3 +146,13 @@ export interface TaskFilters {
   direction_id?: number
   tag_ids?: number[]
 }
+
+export interface ColumnWidthConfig {
+  minWidth?: number
+  maxWidth?: number
+}
+
+export interface ColumnSettings {
+  visible: string[]
+  widths: Record<string, ColumnWidthConfig>
+}
