@@ -156,3 +156,24 @@ export interface ColumnSettings {
   visible: string[]
   widths: Record<string, ColumnWidthConfig>
 }
+
+export interface SavedView {
+  id: number
+  name: string
+  settings: SavedViewSettings
+  owner_id: number
+  created_at: string
+  updated_at?: string
+}
+
+export interface SavedViewSettings {
+  visible: string[]
+  widths: Record<string, ColumnWidthConfig>
+  liveWidths?: Record<string, number>
+  filters: { field: string; op: string; value: string }[]
+  filterExpression: string
+  sortKey: string | null
+  sortOrder: 'asc' | 'desc'
+  sortKeys?: { key: string; order: 'asc' | 'desc' }[]
+  searchQuery: string
+}

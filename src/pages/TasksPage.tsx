@@ -1,11 +1,12 @@
-import { useState, useMemo, useCallback } from 'react'
+import { useState, useMemo, useCallback, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm, Controller } from 'react-hook-form'
 import { tasksApi } from '../api/tasks'
 import { directionsApi } from '../api/directions'
 import { tagsApi } from '../api/tags'
 import { usersApi } from '../api/users'
-import type { Task, TaskCreate, TaskStatus, TaskPriority, TaskUpdate, ColumnSettings, Direction, Tag } from '../types'
+import { savedViewsApi } from '../api/savedViews'
+import type { Task, TaskCreate, TaskStatus, TaskPriority, TaskUpdate, ColumnSettings, Direction, Tag, SavedViewSettings } from '../types'
 import Modal from '../components/Modal'
 
 // ─── Column types ────────────────────────────────────────────────────────────
@@ -451,6 +452,40 @@ export default function TasksPage() {
     },
   })
 
+  // Saved views
+  const { data: savedViews = [] } = useQuery({
+    queryKey: ['saved-views'],
+    queryFn: savedViewsApi.list,
+  })
+
+  const createViewMutation = useMutation({
+    mutationFn: ({ name, settings }: { name: string; settings: SavedViewSettings }) =>
+      savedViewsApi.create(name, settings),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['saved-views'] })
+    },
+  })
+
+  const deleteViewMutation = useMutation({
+    mutationFn: savedViewsApi.delete,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['saved-views'] })
+    },
+  })
+
+  const updateViewMutation = useMutation({
+    mutationFn: ({ id, settings }: { id: number; settings: SavedViewSettings }) =>
+      savedViewsApi.update(id, settings),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['saved-views'] })
+    },
+  })
+
+  const [isSaveViewOpen, setIsSaveViewOpen] = useState(false)
+  const [isViewChoiceOpen, setIsViewChoiceOpen] = useState(false)
+  const [saveViewName, setSaveViewName] = useState('')
+  const [activeViewId, setActiveViewId] = useState<number | null>(null)
+
   // Advanced filters
   const [advancedFilters, setAdvancedFilters] = useState<FilterRule[]>([])
   const [filterExpression, setFilterExpression] = useState('')
@@ -462,9 +497,16 @@ export default function TasksPage() {
   const [draftWidths, setDraftWidths] = useState<ColumnWidths>({})
   const [draftFilters, setDraftFilters] = useState<FilterRule[]>([])
   const [draftExpression, setDraftExpression] = useState('')
+  const [draftColumnOrder, setDraftColumnOrder] = useState<ColumnKey[]>([...ALL_COLUMN_KEYS])
+  const draftDragRef = useRef<ColumnKey | null>(null)
+  const [draftDragOver, setDraftDragOver] = useState<ColumnKey | null>(null)
 
   const openSettings = (tab: 'fields' | 'filters' = 'fields') => {
-    setDraftVisible([...columnSettings.visible] as ColumnKey[])
+    // Build ordered list: visible columns first (in order), then hidden ones
+    const visible = columnSettings.visible as ColumnKey[]
+    const hidden = ALL_COLUMN_KEYS.filter((k) => !visible.includes(k))
+    setDraftColumnOrder([...visible, ...hidden])
+    setDraftVisible([...visible])
     setDraftWidths(structuredClone(columnSettings.widths))
     setDraftFilters(advancedFilters.map((f) => ({ ...f })))
     setDraftExpression(filterExpression)
@@ -571,7 +613,9 @@ export default function TasksPage() {
   }
 
   const applySettings = () => {
-    const visible = draftVisible.length > 0 ? draftVisible : [...ALL_COLUMN_KEYS]
+    // Preserve the order from draftColumnOrder, picking only visible ones
+    const ordered = draftColumnOrder.filter((k) => draftVisible.includes(k))
+    const visible = ordered.length > 0 ? ordered : [...ALL_COLUMN_KEYS]
     const next: ColumnSettings = { visible, widths: draftWidths }
     saveMutation.mutate(next)
     setAdvancedFilters(draftFilters)
@@ -580,20 +624,128 @@ export default function TasksPage() {
   }
 
   const isVisible = (key: ColumnKey) => columnSettings.visible.includes(key)
+  const orderedVisibleColumns = useMemo(() => {
+    const order = columnSettings.visible as ColumnKey[]
+    return order
+      .map((key) => COLUMNS.find((c) => c.key === key))
+      .filter((c): c is typeof COLUMNS[number] => c !== undefined)
+  }, [columnSettings.visible])
   const visibleColCount = columnSettings.visible.length + 2 // +checkbox +actions
 
-  // Sorting
-  const [sortKey, setSortKey] = useState<SortKey | null>(null)
-  const [sortOrder, setSortOrder] = useState<SortOrder>('asc')
+  // Column drag reorder (table header)
+  const dragColRef = useRef<ColumnKey | null>(null)
+  const [dragOverCol, setDragOverCol] = useState<ColumnKey | null>(null)
 
-  const handleSort = (key: SortKey) => {
-    if (sortKey === key) {
-      if (sortOrder === 'asc') setSortOrder('desc')
-      else { setSortKey(null); setSortOrder('asc') }
-    } else {
-      setSortKey(key)
-      setSortOrder('asc')
+  const handleColumnDragStart = (key: ColumnKey) => {
+    dragColRef.current = key
+  }
+
+  const handleColumnDragOver = (e: React.DragEvent, key: ColumnKey) => {
+    e.preventDefault()
+    if (dragColRef.current && dragColRef.current !== key) {
+      setDragOverCol(key)
     }
+  }
+
+  const handleColumnDrop = (key: ColumnKey) => {
+    const from = dragColRef.current
+    if (!from || from === key) { dragColRef.current = null; setDragOverCol(null); return }
+    const order = [...columnSettings.visible] as ColumnKey[]
+    const fromIdx = order.indexOf(from)
+    const toIdx = order.indexOf(key)
+    if (fromIdx === -1 || toIdx === -1) { dragColRef.current = null; setDragOverCol(null); return }
+    order.splice(fromIdx, 1)
+    order.splice(toIdx, 0, from)
+    saveMutation.mutate({ visible: order, widths: columnSettings.widths })
+    dragColRef.current = null
+    setDragOverCol(null)
+  }
+
+  const handleColumnDragEnd = () => {
+    dragColRef.current = null
+    setDragOverCol(null)
+  }
+
+  // Column resize
+  const [liveWidths, setLiveWidths] = useState<Record<string, number>>({})
+  const resizeRef = useRef<{ key: ColumnKey; startX: number; startW: number; maxAllowed: number } | null>(null)
+  const tableContainerRef = useRef<HTMLDivElement>(null)
+
+  const getColWidth = (key: ColumnKey): number | undefined => {
+    if (liveWidths[key]) return liveWidths[key]
+    return colFixedWidth(key, columnSettings.widths)
+  }
+
+  const handleResizeStart = (e: React.MouseEvent, key: ColumnKey) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const th = (e.target as HTMLElement).closest('th')
+    if (!th) return
+    const startW = th.getBoundingClientRect().width
+
+    const minW = columnSettings.widths[key]?.minWidth ?? 100
+    const maxW = columnSettings.widths[key]?.maxWidth
+
+    // Calculate max allowed width so other columns keep at least 50px each
+    const containerW = tableContainerRef.current?.clientWidth ?? Infinity
+    const fixedW = 80 // checkbox (40) + actions (40)
+    const otherColsMinW = orderedVisibleColumns
+      .filter((c) => c.key !== key)
+      .reduce((sum, c) => sum + (columnSettings.widths[c.key]?.minWidth ?? 100), 0)
+    const maxFromContainer = containerW - fixedW - otherColsMinW
+    let maxAllowed = Math.max(minW, maxFromContainer)
+    if (maxW) maxAllowed = Math.min(maxW, maxAllowed)
+
+    resizeRef.current = { key, startX: e.clientX, startW, maxAllowed }
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!resizeRef.current) return
+      const delta = ev.clientX - resizeRef.current.startX
+      let newW = Math.max(minW, resizeRef.current.startW + delta)
+      newW = Math.min(resizeRef.current.maxAllowed, newW)
+      setLiveWidths((prev) => ({ ...prev, [key]: newW }))
+    }
+
+    const onMouseUp = () => {
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      resizeRef.current = null
+    }
+
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }
+
+  // Sorting (multi-column)
+  const [sortKeys, setSortKeys] = useState<{ key: SortKey; order: SortOrder }[]>([])
+
+  const handleSort = (key: SortKey, append = false) => {
+    setSortKeys((prev) => {
+      const idx = prev.findIndex((s) => s.key === key)
+      if (idx !== -1) {
+        // Already sorting by this column
+        if (prev[idx].order === 'asc') {
+          // Toggle to desc
+          const next = [...prev]
+          next[idx] = { key, order: 'desc' }
+          return next
+        } else {
+          // Remove this sort
+          return prev.filter((_, i) => i !== idx)
+        }
+      } else {
+        // Add new sort column
+        if (append) {
+          return [...prev, { key, order: 'asc' }]
+        } else {
+          return [{ key, order: 'asc' }]
+        }
+      }
+    })
   }
 
   // Filters
@@ -678,35 +830,36 @@ export default function TasksPage() {
       return true
     })
 
-    if (!sortKey) return filtered
+    if (sortKeys.length === 0) return filtered
 
-    const sorted = [...filtered].sort((a, b) => {
-      let cmp = 0
-      switch (sortKey) {
+    const compareByKey = (a: Task, b: Task, key: SortKey): number => {
+      switch (key) {
         case 'title':
-          cmp = a.title.localeCompare(b.title, 'uk')
-          break
+          return a.title.localeCompare(b.title, 'uk')
         case 'status':
-          cmp = STATUS_ORDER[a.status] - STATUS_ORDER[b.status]
-          break
+          return STATUS_ORDER[a.status] - STATUS_ORDER[b.status]
         case 'priority':
-          cmp = PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]
-          break
+          return PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority]
         case 'direction':
-          cmp = (a.direction?.name ?? '').localeCompare(b.direction?.name ?? '', 'uk')
-          break
+          return (a.direction?.name ?? '').localeCompare(b.direction?.name ?? '', 'uk')
         case 'due_date': {
           const da = a.due_date ? new Date(a.due_date).getTime() : Infinity
           const db = b.due_date ? new Date(b.due_date).getTime() : Infinity
-          cmp = da - db
-          break
+          return da - db
         }
       }
-      return sortOrder === 'asc' ? cmp : -cmp
+    }
+
+    const sorted = [...filtered].sort((a, b) => {
+      for (const { key, order } of sortKeys) {
+        const cmp = compareByKey(a, b, key)
+        if (cmp !== 0) return order === 'asc' ? cmp : -cmp
+      }
+      return 0
     })
 
     return sorted
-  }, [tasks, searchQuery, sortKey, sortOrder, advancedFilters, filterExpression, FILTER_FIELDS])
+  }, [tasks, searchQuery, sortKeys, advancedFilters, filterExpression, FILTER_FIELDS])
 
   const activeFiltersCount = advancedFilters.length
 
@@ -714,6 +867,78 @@ export default function TasksPage() {
     setSearchQuery('')
     setAdvancedFilters([])
     setFilterExpression('')
+  }
+
+  const hasAnyFilters = advancedFilters.length > 0 || searchQuery.trim() !== ''
+
+  const getCurrentViewSettings = (): SavedViewSettings => ({
+    visible: [...columnSettings.visible],
+    widths: structuredClone(columnSettings.widths),
+    liveWidths: { ...liveWidths },
+    filters: advancedFilters.map((f) => ({ ...f })),
+    filterExpression,
+    sortKey: sortKeys.length > 0 ? sortKeys[0].key : null,
+    sortOrder: sortKeys.length > 0 ? sortKeys[0].order : 'asc',
+    sortKeys: sortKeys.map((s) => ({ ...s })),
+    searchQuery,
+  })
+
+  const handleSaveViewClick = () => {
+    if (activeViewId !== null) {
+      setIsViewChoiceOpen(true)
+    } else {
+      setSaveViewName('')
+      setIsSaveViewOpen(true)
+    }
+  }
+
+  const handleUpdateCurrentView = () => {
+    if (activeViewId === null) return
+    updateViewMutation.mutate(
+      { id: activeViewId, settings: getCurrentViewSettings() },
+      { onSuccess: () => setIsViewChoiceOpen(false) },
+    )
+  }
+
+  const handleSaveAsNew = () => {
+    setIsViewChoiceOpen(false)
+    setSaveViewName('')
+    setIsSaveViewOpen(true)
+  }
+
+  const handleSaveView = () => {
+    if (!saveViewName.trim()) return
+    createViewMutation.mutate(
+      { name: saveViewName.trim(), settings: getCurrentViewSettings() },
+      {
+        onSuccess: () => {
+          setIsSaveViewOpen(false)
+          setSaveViewName('')
+        },
+      },
+    )
+  }
+
+  const applyView = (view: typeof savedViews[number]) => {
+    const s = view.settings as SavedViewSettings
+    // Apply column settings
+    saveMutation.mutate({ visible: s.visible, widths: s.widths })
+    // Apply live widths
+    setLiveWidths(s.liveWidths ?? {})
+    // Apply filters
+    setAdvancedFilters(s.filters as FilterRule[])
+    setFilterExpression(s.filterExpression)
+    // Apply sort
+    if (s.sortKeys && s.sortKeys.length > 0) {
+      setSortKeys(s.sortKeys.map((sk) => ({ key: sk.key as SortKey, order: sk.order })))
+    } else if (s.sortKey) {
+      setSortKeys([{ key: s.sortKey as SortKey, order: s.sortOrder ?? 'asc' }])
+    } else {
+      setSortKeys([])
+    }
+    // Apply search
+    setSearchQuery(s.searchQuery ?? '')
+    setActiveViewId(view.id)
   }
 
   return (
@@ -767,17 +992,59 @@ export default function TasksPage() {
               ))}
             </div>
           </div>
+
+          {/* Saved views */}
+          {savedViews.length > 0 && (
+            <div>
+              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Збережені відображення</h3>
+              <div className="space-y-1">
+                {savedViews.map((view) => (
+                  <div key={view.id} className="flex items-center group">
+                    <button
+                      onClick={() => applyView(view)}
+                      className={`flex-1 text-left text-sm px-2 py-1.5 rounded transition-colors truncate ${
+                        activeViewId === view.id
+                          ? 'bg-indigo-50 text-indigo-700 font-medium'
+                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                      }`}
+                      title={view.name}
+                    >
+                      <svg className="w-3.5 h-3.5 inline-block mr-1.5 -mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                      {view.name}
+                    </button>
+                    <button
+                      onClick={() => deleteViewMutation.mutate(view.id)}
+                      className="p-1 text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all flex-shrink-0"
+                      title="Видалити"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
-        {/* Bottom link */}
-        <div className="px-4 py-3 border-t border-slate-100">
-          <button
-            onClick={clearAllFilters}
-            className="text-xs text-indigo-600 hover:text-indigo-800 hover:underline transition-colors"
-          >
-            Скинути фільтри
-          </button>
-        </div>
+        {/* Bottom: save view button (visible only when filters are active) */}
+        {hasAnyFilters && (
+          <div className="px-4 py-3 border-t border-slate-100">
+            <button
+              onClick={handleSaveViewClick}
+              className="flex items-center gap-1.5 text-xs text-indigo-600 hover:text-indigo-800 transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+              </svg>
+              Зберегти відображення
+            </button>
+          </div>
+        )}
       </aside>
 
       {/* Main area */}
@@ -857,7 +1124,7 @@ export default function TasksPage() {
         </div>
 
         {/* Table */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden">
+        <div ref={tableContainerRef} className="flex-1 overflow-y-auto overflow-x-hidden">
           {isLoading ? (
             <div className="flex items-center justify-center h-40">
               <div className="animate-spin rounded-full h-7 w-7 border-b-2 border-indigo-600" />
@@ -867,8 +1134,8 @@ export default function TasksPage() {
               <table className="w-full text-sm border-collapse table-fixed">
                 <colgroup>
                   <col style={{ width: 40 }} />
-                  {COLUMNS.filter((col) => isVisible(col.key)).map((col) => {
-                    const w = colFixedWidth(col.key, columnSettings.widths)
+                  {orderedVisibleColumns.map((col) => {
+                    const w = getColWidth(col.key)
                     return <col key={col.key} style={w ? { width: w } : undefined} />
                   })}
                   <col style={{ width: 40 }} />
@@ -878,30 +1145,53 @@ export default function TasksPage() {
                     <th className="px-4 py-2.5">
                       <input type="checkbox" className="w-3.5 h-3.5 rounded border-slate-300" />
                     </th>
-                    {COLUMNS.filter((col) => isVisible(col.key)).map((col) => (
-                      <th
-                        key={col.key}
-                        className={`text-left px-3 py-2.5 text-xs font-semibold uppercase tracking-wider cursor-pointer select-none hover:bg-slate-100 transition-colors overflow-hidden ${
-                          sortKey === col.key ? 'text-indigo-600' : 'text-slate-500'
-                        }`}
-                        onClick={() => handleSort(col.key)}
-                      >
-                        <span className="inline-flex items-center gap-1">
-                          {col.label}
-                          {sortKey === col.key ? (
-                            <svg className="w-3 h-3" viewBox="0 0 12 12" fill="currentColor">
-                              {sortOrder === 'asc'
-                                ? <path d="M6 2l4 5H2z" />
-                                : <path d="M6 10l4-5H2z" />}
-                            </svg>
-                          ) : (
-                            <svg className="w-3 h-3 opacity-0 group-hover:opacity-30" viewBox="0 0 12 12" fill="currentColor">
-                              <path d="M6 2l4 5H2z" />
-                            </svg>
-                          )}
-                        </span>
-                      </th>
-                    ))}
+                    {orderedVisibleColumns.map((col) => {
+                      const sortEntry = sortKeys.find((s) => s.key === col.key)
+                      const sortIndex = sortKeys.findIndex((s) => s.key === col.key)
+                      return (
+                        <th
+                          key={col.key}
+                          draggable
+                          onDragStart={() => handleColumnDragStart(col.key)}
+                          onDragOver={(e) => handleColumnDragOver(e, col.key)}
+                          onDrop={() => handleColumnDrop(col.key)}
+                          onDragEnd={handleColumnDragEnd}
+                          className={`relative text-left px-3 py-2.5 text-xs font-semibold uppercase tracking-wider cursor-grab select-none hover:bg-slate-100 transition-colors overflow-hidden ${
+                            sortEntry ? 'text-indigo-600' : 'text-slate-500'
+                          } ${dragOverCol === col.key ? 'bg-indigo-50 border-l-2 border-indigo-400' : ''}`}
+                          onClick={(e) => handleSort(col.key, e.shiftKey)}
+                          title="Клік — сортувати, Shift+клік — додати до сортування, перетягніть — змінити порядок"
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            {col.label}
+                            {sortEntry ? (
+                              <>
+                                <svg className="w-3 h-3" viewBox="0 0 12 12" fill="currentColor">
+                                  {sortEntry.order === 'asc'
+                                    ? <path d="M6 2l4 5H2z" />
+                                    : <path d="M6 10l4-5H2z" />}
+                                </svg>
+                                {sortKeys.length > 1 && (
+                                  <span className="text-[9px] font-bold leading-none">{sortIndex + 1}</span>
+                                )}
+                              </>
+                            ) : (
+                              <svg className="w-3 h-3 opacity-0 group-hover:opacity-30" viewBox="0 0 12 12" fill="currentColor">
+                                <path d="M6 2l4 5H2z" />
+                              </svg>
+                            )}
+                          </span>
+                          {/* Resize handle */}
+                          <div
+                            onMouseDown={(e) => handleResizeStart(e, col.key)}
+                            onClick={(e) => e.stopPropagation()}
+                            onDragStart={(e) => e.stopPropagation()}
+                            draggable={false}
+                            className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-indigo-400 transition-colors z-10"
+                          />
+                        </th>
+                      )
+                    })}
                     <th className="px-2 py-2.5" />
                   </tr>
                 </thead>
@@ -929,73 +1219,75 @@ export default function TasksPage() {
                             <input type="checkbox" className="w-3.5 h-3.5 rounded border-slate-300 cursor-pointer" />
                           </td>
 
-                          {/* Title + avatar */}
-                          {isVisible('title') && (
-                            <td className="px-3 py-2.5 overflow-hidden">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className={`w-7 h-7 rounded-full ${avatarColor} flex items-center justify-center flex-shrink-0`}>
-                                  <span className="text-xs font-semibold text-white">{initials}</span>
-                                </div>
-                                <div className="min-w-0 overflow-hidden">
-                                  <p className="font-medium text-slate-800 truncate">{task.title}</p>
-                                  {task.description && (
-                                    <p className="text-xs text-slate-400 truncate">{task.description}</p>
-                                  )}
-                                </div>
-                              </div>
-                            </td>
-                          )}
-
-                          {/* Status */}
-                          {isVisible('status') && (
-                            <td className="px-3 py-2.5 overflow-hidden">
-                              <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium truncate ${STATUS_STYLES[task.status]}`}>
-                                {STATUS_OPTIONS.find((o) => o.value === task.status)?.label}
-                              </span>
-                            </td>
-                          )}
-
-                          {/* Priority */}
-                          {isVisible('priority') && (
-                            <td className="px-3 py-2.5 overflow-hidden">
-                              <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium truncate ${PRIORITY_STYLES[task.priority]}`}>
-                                {PRIORITY_OPTIONS.find((o) => o.value === task.priority)?.label}
-                              </span>
-                            </td>
-                          )}
-
-                          {/* Direction */}
-                          {isVisible('direction') && (
-                            <td className="px-3 py-2.5 overflow-hidden">
-                              {task.direction ? (
-                                <span
-                                  className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium truncate max-w-full"
-                                  style={
-                                    task.direction.color
-                                      ? { backgroundColor: task.direction.color + '22', color: task.direction.color }
-                                      : { backgroundColor: '#ede9fe', color: '#6d28d9' }
-                                  }
-                                >
-                                  {task.direction.name}
-                                </span>
-                              ) : (
-                                <span className="text-slate-300 text-xs">—</span>
-                              )}
-                            </td>
-                          )}
-
-                          {/* Due date */}
-                          {isVisible('due_date') && (
-                            <td className="px-3 py-2.5 overflow-hidden">
-                              {task.due_date ? (
-                                <span className="text-xs text-slate-500 whitespace-nowrap">
-                                  {new Date(task.due_date).toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit', year: '2-digit' })}
-                                </span>
-                              ) : (
-                                <span className="text-slate-300 text-xs">—</span>
-                              )}
-                            </td>
-                          )}
+                          {orderedVisibleColumns.map((col) => {
+                            switch (col.key) {
+                              case 'title':
+                                return (
+                                  <td key="title" className="px-3 py-2.5 overflow-hidden">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <div className={`w-7 h-7 rounded-full ${avatarColor} flex items-center justify-center flex-shrink-0`}>
+                                        <span className="text-xs font-semibold text-white">{initials}</span>
+                                      </div>
+                                      <div className="min-w-0 overflow-hidden">
+                                        <p className="font-medium text-slate-800 truncate">{task.title}</p>
+                                        {task.description && (
+                                          <p className="text-xs text-slate-400 truncate">{task.description}</p>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </td>
+                                )
+                              case 'status':
+                                return (
+                                  <td key="status" className="px-3 py-2.5 overflow-hidden">
+                                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium truncate ${STATUS_STYLES[task.status]}`}>
+                                      {STATUS_OPTIONS.find((o) => o.value === task.status)?.label}
+                                    </span>
+                                  </td>
+                                )
+                              case 'priority':
+                                return (
+                                  <td key="priority" className="px-3 py-2.5 overflow-hidden">
+                                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium truncate ${PRIORITY_STYLES[task.priority]}`}>
+                                      {PRIORITY_OPTIONS.find((o) => o.value === task.priority)?.label}
+                                    </span>
+                                  </td>
+                                )
+                              case 'direction':
+                                return (
+                                  <td key="direction" className="px-3 py-2.5 overflow-hidden">
+                                    {task.direction ? (
+                                      <span
+                                        className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium truncate max-w-full"
+                                        style={
+                                          task.direction.color
+                                            ? { backgroundColor: task.direction.color + '22', color: task.direction.color }
+                                            : { backgroundColor: '#ede9fe', color: '#6d28d9' }
+                                        }
+                                      >
+                                        {task.direction.name}
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-300 text-xs">—</span>
+                                    )}
+                                  </td>
+                                )
+                              case 'due_date':
+                                return (
+                                  <td key="due_date" className="px-3 py-2.5 overflow-hidden">
+                                    {task.due_date ? (
+                                      <span className="text-xs text-slate-500 whitespace-nowrap">
+                                        {new Date(task.due_date).toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit', year: '2-digit' })}
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-300 text-xs">—</span>
+                                    )}
+                                  </td>
+                                )
+                              default:
+                                return null
+                            }
+                          })}
 
                           {/* Delete */}
                           <td className="px-2 py-2.5" onClick={(e) => e.stopPropagation()}>
@@ -1050,6 +1342,61 @@ export default function TasksPage() {
         </div>
       </Modal>
 
+      {/* View Choice Modal */}
+      <Modal isOpen={isViewChoiceOpen} onClose={() => setIsViewChoiceOpen(false)} title="Збереження відображення" size="sm">
+        <p className="text-sm text-slate-600 mb-4">
+          У вас вже обрано відображення «{savedViews.find((v) => v.id === activeViewId)?.name}». Що ви хочете зробити?
+        </p>
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={handleUpdateCurrentView}
+            disabled={updateViewMutation.isPending}
+            className="w-full px-4 py-2.5 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-60"
+          >
+            {updateViewMutation.isPending ? 'Оновлення...' : 'Оновити поточне відображення'}
+          </button>
+          <button
+            onClick={handleSaveAsNew}
+            className="w-full px-4 py-2.5 text-sm font-medium text-indigo-600 bg-white border border-indigo-300 rounded-lg hover:bg-indigo-50 transition-colors"
+          >
+            Зберегти як нове відображення
+          </button>
+        </div>
+      </Modal>
+
+      {/* Save View Modal */}
+      <Modal isOpen={isSaveViewOpen} onClose={() => setIsSaveViewOpen(false)} title="Збереження відображення" size="sm">
+        <div className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Назва відображення</label>
+            <input
+              type="text"
+              value={saveViewName}
+              onChange={(e) => setSaveViewName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSaveView() }}
+              placeholder="Введіть назву..."
+              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+              autoFocus
+            />
+          </div>
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => setIsSaveViewOpen(false)}
+              className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+            >
+              Скасувати
+            </button>
+            <button
+              onClick={handleSaveView}
+              disabled={!saveViewName.trim() || createViewMutation.isPending}
+              className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-60"
+            >
+              {createViewMutation.isPending ? 'Збереження...' : 'Зберегти'}
+            </button>
+          </div>
+        </div>
+      </Modal>
+
       {/* Settings Modal */}
       <Modal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} title="Налаштування" size="xl">
         <div className="flex gap-6 min-h-[400px]">
@@ -1078,18 +1425,47 @@ export default function TasksPage() {
             {/* ── Поля tab ── */}
             {settingsTab === 'fields' && (
               <div>
-                <p className="text-sm text-slate-500 mb-4">Оберіть, які стовпці відображати, та вкажіть їхню ширину (px).</p>
+                <p className="text-sm text-slate-500 mb-4">Оберіть, які стовпці відображати, та вкажіть їхню ширину (px). Перетягніть для зміни порядку.</p>
                 <div className="space-y-1">
-                  <div className="grid grid-cols-[auto_1fr_80px_80px] gap-3 px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                  <div className="grid grid-cols-[20px_auto_1fr_80px_80px] gap-3 px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                    <div />
                     <div className="w-4" />
                     <div>Стовпець</div>
                     <div>Мін</div>
                     <div>Макс</div>
                   </div>
-                  {COLUMNS.map((col) => {
+                  {draftColumnOrder.map((colKey) => {
+                    const col = COLUMNS.find((c) => c.key === colKey)!
                     const enabled = draftVisible.includes(col.key)
                     return (
-                      <div key={col.key} className="grid grid-cols-[auto_1fr_80px_80px] gap-3 items-center px-3 py-2 rounded-lg hover:bg-slate-50 transition-colors">
+                      <div
+                        key={col.key}
+                        draggable
+                        onDragStart={() => { draftDragRef.current = col.key }}
+                        onDragOver={(e) => { e.preventDefault(); if (draftDragRef.current && draftDragRef.current !== col.key) setDraftDragOver(col.key) }}
+                        onDrop={() => {
+                          const from = draftDragRef.current
+                          if (from && from !== col.key) {
+                            setDraftColumnOrder((prev) => {
+                              const next = [...prev]
+                              const fi = next.indexOf(from)
+                              const ti = next.indexOf(col.key)
+                              next.splice(fi, 1)
+                              next.splice(ti, 0, from)
+                              return next
+                            })
+                          }
+                          draftDragRef.current = null
+                          setDraftDragOver(null)
+                        }}
+                        onDragEnd={() => { draftDragRef.current = null; setDraftDragOver(null) }}
+                        className={`grid grid-cols-[20px_auto_1fr_80px_80px] gap-3 items-center px-3 py-2 rounded-lg hover:bg-slate-50 transition-colors cursor-grab ${
+                          draftDragOver === col.key ? 'bg-indigo-50 border-t-2 border-indigo-400' : ''
+                        }`}
+                      >
+                        <svg className="w-4 h-4 text-slate-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8h16M4 16h16" />
+                        </svg>
                         <input type="checkbox" checked={enabled} onChange={() => toggleDraftColumn(col.key)} className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer" />
                         <span className={`text-sm ${enabled ? 'text-slate-700' : 'text-slate-400'}`}>{col.label}</span>
                         <input type="number" min={0} placeholder="—" value={draftWidths[col.key]?.minWidth ?? ''} onChange={(e) => setDraftWidth(col.key, 'minWidth', e.target.value)} disabled={!enabled} className="w-full px-2 py-1 border border-slate-200 rounded text-sm text-center focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-50 disabled:text-slate-300" />
