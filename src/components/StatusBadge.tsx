@@ -3,10 +3,11 @@ import type { TaskStatus } from '../types'
 interface Props { status: TaskStatus }
 
 const config: Record<TaskStatus, { label: string; className: string }> = {
-  new:         { label: 'Нове',      className: 'bg-[#fff9c4] text-[#795548] border border-[#f9a825]' },
-  in_progress: { label: 'В роботі', className: 'bg-[#fff3cd] text-[#856404] border border-[#ffc107]' },
-  completed:   { label: 'Завершено', className: 'bg-[#d4edda] text-[#155724] border border-[#28a745]' },
-  cancelled:   { label: 'Скасовано',className: 'bg-[#f8f9fa] text-[#6c757d] border border-[#ced4da]' },
+  new:         { label: 'Нове',       className: 'bg-[#fff9c4] text-[#795548] border border-[#f9a825]' },
+  in_progress: { label: 'В роботі',  className: 'bg-[#fff3cd] text-[#856404] border border-[#ffc107]' },
+  on_hold:     { label: 'Відкладено', className: 'bg-[#e8eaf6] text-[#283593] border border-[#7986cb]' },
+  completed:   { label: 'Завершено',  className: 'bg-[#d4edda] text-[#155724] border border-[#28a745]' },
+  cancelled:   { label: 'Скасовано',  className: 'bg-[#f8f9fa] text-[#6c757d] border border-[#ced4da]' },
 }
 
 export default function StatusBadge({ status }: Props) {

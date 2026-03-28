@@ -15,6 +15,7 @@ const COLUMN_LABELS: Record<ColumnKey, string> = {
 const STATUS_LABELS: Record<TaskStatus, string> = {
   new: 'Нове',
   in_progress: 'В роботі',
+  on_hold: 'Відкладено',
   completed: 'Завершено',
   cancelled: 'Скасовано',
 }

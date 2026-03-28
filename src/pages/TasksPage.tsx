@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
+import { useState, useMemo, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm, Controller } from 'react-hook-form'
 import { tasksApi } from '../api/tasks'
@@ -6,7 +6,7 @@ import { directionsApi } from '../api/directions'
 import { tagsApi } from '../api/tags'
 import { usersApi } from '../api/users'
 import { savedViewsApi } from '../api/savedViews'
-import type { Task, TaskCreate, TaskStatus, TaskPriority, TaskUpdate, ColumnSettings, Direction, Tag, SavedViewSettings } from '../types'
+import type { Task, TaskCreate, TaskStatus, TaskPriority, TaskUpdate, ColumnSettings, SavedViewSettings } from '../types'
 import Modal from '../components/Modal'
 import { exportToCSV, exportToExcel } from '../utils/exportTasks'
 
@@ -37,7 +37,7 @@ function colFixedWidth(key: ColumnKey, widths: ColumnWidths): number | undefined
   return undefined
 }
 
-const STATUS_ORDER: Record<TaskStatus, number> = { new: 0, in_progress: 1, completed: 2, cancelled: 3 }
+const STATUS_ORDER: Record<TaskStatus, number> = { new: 0, in_progress: 1, on_hold: 2, completed: 3, cancelled: 4 }
 const PRIORITY_ORDER: Record<TaskPriority, number> = { low: 0, medium: 1, high: 2, urgent: 3 }
 
 // ─── Advanced filter types ───────────────────────────────────────────────────
@@ -245,6 +245,7 @@ function applyAdvancedFilters(
 const STATUS_OPTIONS: { value: TaskStatus; label: string }[] = [
   { value: 'new', label: 'Нове' },
   { value: 'in_progress', label: 'В роботі' },
+  { value: 'on_hold', label: 'Відкладено' },
   { value: 'completed', label: 'Завершено' },
   { value: 'cancelled', label: 'Скасовано' },
 ]
@@ -259,6 +260,7 @@ const PRIORITY_OPTIONS: { value: TaskPriority; label: string }[] = [
 const STATUS_STYLES: Record<TaskStatus, string> = {
   new:         'bg-[#fff9c4] text-[#795548] border border-[#f9a825]',
   in_progress: 'bg-[#fff3cd] text-[#856404] border border-[#ffc107]',
+  on_hold:     'bg-[#e8eaf6] text-[#283593] border border-[#7986cb]',
   completed:   'bg-[#d4edda] text-[#155724] border border-[#28a745]',
   cancelled:   'bg-[#f8f9fa] text-[#6c757d] border border-[#ced4da]',
 }
@@ -723,18 +725,22 @@ export default function TasksPage() {
       setLiveWidths((prev) => ({ ...prev, [key]: newW }))
     }
 
+    const setBodyResizeStyle = (active: boolean) => {
+      const { style } = document.body
+      style.cursor = active ? 'col-resize' : ''
+      style.userSelect = active ? 'none' : ''
+    }
+
     const onMouseUp = () => {
       document.removeEventListener('mousemove', onMouseMove)
       document.removeEventListener('mouseup', onMouseUp)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
+      setBodyResizeStyle(false)
       resizeRef.current = null
     }
 
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseup', onMouseUp)
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
+    setBodyResizeStyle(true)
   }
 
   // Sorting (multi-column)
@@ -778,14 +784,14 @@ export default function TasksPage() {
     queryFn: directionsApi.getDirections,
   })
 
-  const FILTER_FIELDS: FilterFieldDef[] = useMemo(() => [
+  const FILTER_FIELDS: FilterFieldDef[] = [
     { key: 'title', label: 'Назва', type: 'string' },
     { key: 'description', label: 'Опис', type: 'string' },
     { key: 'status', label: 'Статус', type: 'enum', options: STATUS_OPTIONS.map((o) => ({ value: o.value, label: o.label })) },
     { key: 'priority', label: 'Пріоритет', type: 'enum', options: PRIORITY_OPTIONS.map((o) => ({ value: o.value, label: o.label })) },
     { key: 'direction', label: 'Напрямок', type: 'relation', options: directions.map((d) => ({ value: String(d.id), label: d.name })) },
     { key: 'due_date', label: 'Дедлайн', type: 'date' },
-  ], [directions])
+  ]
 
   const deleteMutation = useMutation({
     mutationFn: tasksApi.deleteTask,
@@ -837,7 +843,7 @@ export default function TasksPage() {
     addOrRemoveSidebarFilter('status', 'equals', status)
   }
 
-  const filteredTasks = useMemo(() => {
+  const filteredTasks = (() => {
     const filtered = tasks.filter((task) => {
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase()
@@ -878,7 +884,7 @@ export default function TasksPage() {
     })
 
     return sorted
-  }, [tasks, searchQuery, sortKeys, advancedFilters, filterExpression, FILTER_FIELDS])
+  })()
 
   const handleExportCSV = () => {
     exportToCSV(filteredTasks, columnSettings.visible as ColumnKey[])
@@ -971,10 +977,125 @@ export default function TasksPage() {
   }
 
   return (
-    <div className="flex h-full overflow-hidden">
-      {/* Left filter panel */}
-      <aside className="w-40 bg-[#f5f5f5] border-r border-[#e0e0e0] flex flex-col flex-shrink-0 overflow-y-auto">
-        <div className="flex-1 p-4 space-y-6">
+    <div className="flex flex-col h-full overflow-hidden" style={{fontFamily:"'Open Sans',sans-serif"}}>
+      {/* Toolbar */}
+      <div className="flex items-center gap-2 px-4 py-2 border-b border-[#e0e0e0] bg-white flex-shrink-0">
+        {/* Create button */}
+        <button
+          onClick={() => setIsCreateOpen(true)}
+          className="flex items-center gap-1.5 px-4 py-1.5 bg-[#e53935] text-white text-[13px] font-semibold rounded-[3px] hover:bg-[#c62828] transition-colors flex-shrink-0"
+        >
+          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+          </svg>
+          Створити
+        </button>
+
+        {/* Search */}
+        <div className="relative flex-1">
+          <svg className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+          </svg>
+          <input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Пошук задач..."
+            className="w-full pl-9 pr-3 py-1.5 border border-[#e0e0e0] rounded-[3px] text-[13px] focus:outline-none focus:border-[#1a73e8] bg-[#f5f5f5] focus:bg-white transition-colors"
+          />
+        </div>
+
+        <div className="flex items-center gap-2 ml-auto">
+          {/* Filter button */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={openSettingsFilters}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                activeFiltersCount > 0
+                  ? 'bg-[#e8f0fe] text-[#1a73e8] border border-[#1a73e8]'
+                  : 'bg-white text-[#666] border border-[#e0e0e0] hover:bg-[#f5f5f5]'
+              }`}
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z" />
+              </svg>
+              Фільтри
+              {activeFiltersCount > 0 && (
+                <span className="ml-0.5 px-1.5 py-0.5 bg-[#1a73e8] text-white rounded-full text-[10px] leading-none">{activeFiltersCount}</span>
+              )}
+            </button>
+            {activeFiltersCount > 0 && (
+              <button
+                onClick={clearAllFilters}
+                title="Скинути всі фільтри"
+                className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
+
+          {/* Record count */}
+          <span className="text-[12px] text-[#999] whitespace-nowrap">
+            {filteredTasks.length} {filteredTasks.length === 1 ? 'запис' : 'записів'}
+            {filteredTasks.length !== tasks.length && `, фільтр...`}
+          </span>
+
+          {/* Export */}
+          <div className="relative" ref={exportRef}>
+            <button
+              onClick={() => setIsExportOpen((v) => !v)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-[3px] text-[12px] font-medium bg-white text-[#666] border border-[#e0e0e0] hover:bg-[#f5f5f5] transition-colors"
+              title="Експорт задач"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Експорт
+              <svg className={`w-3 h-3 transition-transform ${isExportOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {isExportOpen && (
+              <div className="absolute right-0 mt-1 w-44 bg-white border border-[#e0e0e0] rounded shadow-lg z-50 py-1">
+                <button
+                  onClick={handleExportCSV}
+                  className="flex items-center gap-2 w-full px-3 py-2 text-[13px] text-[#333] hover:bg-[#f5f5f5] transition-colors"
+                >
+                  <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Експорт у CSV
+                </button>
+                <button
+                  onClick={handleExportExcel}
+                  className="flex items-center gap-2 w-full px-3 py-2 text-[13px] text-[#333] hover:bg-[#f5f5f5] transition-colors"
+                >
+                  <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  Експорт у Excel
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Settings */}
+          <button onClick={() => openSettings('fields')} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors">
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      {/* Content: sidebar + table */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left filter panel */}
+        <aside className="w-52 bg-[#f5f5f5] border-r border-[#e0e0e0] flex flex-col flex-shrink-0 overflow-y-auto">
+          <div className="flex-1 p-4 space-y-6">
           {/* Direction filter */}
           <div>
             <h3 className="text-[11px] font-semibold text-[#999] uppercase tracking-wide mb-2 px-3">Напрямок</h3>
@@ -1025,7 +1146,7 @@ export default function TasksPage() {
           {/* Saved views */}
           {savedViews.length > 0 && (
             <div>
-              <h3 className="text-[11px] font-semibold text-[#999] uppercase tracking-wide mb-2 px-3">Збережені відображення</h3>
+              <h3 className="text-[11px] font-semibold text-[#999] uppercase tracking-wide mb-2 px-3">Збережені списки</h3>
               <div className="space-y-1">
                 {savedViews.map((view) => (
                   <div key={view.id} className="flex items-center group">
@@ -1070,127 +1191,14 @@ export default function TasksPage() {
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
               </svg>
-              Зберегти відображення
+              Зберегти список
             </button>
           </div>
         )}
       </aside>
 
       {/* Main area */}
-      <div className="flex-1 flex flex-col overflow-hidden bg-white" style={{fontFamily:"'Open Sans',sans-serif"}}>
-        {/* Toolbar */}
-        <div className="flex items-center gap-2 px-4 py-2 border-b border-[#e0e0e0] bg-white flex-shrink-0">
-          {/* Create button */}
-          <button
-            onClick={() => setIsCreateOpen(true)}
-            className="flex items-center gap-1.5 px-4 py-1.5 bg-[#e53935] text-white text-[13px] font-semibold rounded-[3px] hover:bg-[#c62828] transition-colors flex-shrink-0"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            Створити
-          </button>
-
-          {/* Search */}
-          <div className="relative flex-1">
-            <svg className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
-            <input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Пошук задач..."
-              className="w-full pl-9 pr-3 py-1.5 border border-[#e0e0e0] rounded-[3px] text-[13px] focus:outline-none focus:border-[#1a73e8] bg-[#f5f5f5] focus:bg-white transition-colors"
-            />
-          </div>
-
-          <div className="flex items-center gap-2 ml-auto">
-            {/* Filter button */}
-            <div className="flex items-center gap-1">
-              <button
-                onClick={openSettingsFilters}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                  activeFiltersCount > 0
-                    ? 'bg-[#e8f0fe] text-[#1a73e8] border border-[#1a73e8]'
-                    : 'bg-white text-[#666] border border-[#e0e0e0] hover:bg-[#f5f5f5]'
-                }`}
-              >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2a1 1 0 01-.293.707L13 13.414V19a1 1 0 01-.553.894l-4 2A1 1 0 017 21v-7.586L3.293 6.707A1 1 0 013 6V4z" />
-                </svg>
-                Фільтри
-                {activeFiltersCount > 0 && (
-                  <span className="ml-0.5 px-1.5 py-0.5 bg-[#1a73e8] text-white rounded-full text-[10px] leading-none">{activeFiltersCount}</span>
-                )}
-              </button>
-              {activeFiltersCount > 0 && (
-                <button
-                  onClick={clearAllFilters}
-                  title="Скинути всі фільтри"
-                  className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-colors"
-                >
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              )}
-            </div>
-
-            {/* Record count */}
-            <span className="text-[12px] text-[#999] whitespace-nowrap">
-              {filteredTasks.length} {filteredTasks.length === 1 ? 'запис' : 'записів'}
-              {filteredTasks.length !== tasks.length && `, фільтр...`}
-            </span>
-
-            {/* Export */}
-            <div className="relative" ref={exportRef}>
-              <button
-                onClick={() => setIsExportOpen((v) => !v)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-[3px] text-[12px] font-medium bg-white text-[#666] border border-[#e0e0e0] hover:bg-[#f5f5f5] transition-colors"
-                title="Експорт задач"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Експорт
-                <svg className={`w-3 h-3 transition-transform ${isExportOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-              {isExportOpen && (
-                <div className="absolute right-0 mt-1 w-44 bg-white border border-[#e0e0e0] rounded shadow-lg z-50 py-1">
-                  <button
-                    onClick={handleExportCSV}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-[13px] text-[#333] hover:bg-[#f5f5f5] transition-colors"
-                  >
-                    <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    Експорт у CSV
-                  </button>
-                  <button
-                    onClick={handleExportExcel}
-                    className="flex items-center gap-2 w-full px-3 py-2 text-[13px] text-[#333] hover:bg-[#f5f5f5] transition-colors"
-                  >
-                    <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                    </svg>
-                    Експорт у Excel
-                  </button>
-                </div>
-              )}
-            </div>
-
-            {/* Settings */}
-            <button onClick={() => openSettings('fields')} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-              </svg>
-            </button>
-          </div>
-        </div>
-
+      <div className="flex-1 flex flex-col overflow-hidden bg-white">
         {/* Table */}
         <div ref={tableContainerRef} className="flex-1 overflow-y-auto overflow-x-hidden">
           {isLoading ? (
@@ -1386,6 +1394,7 @@ export default function TasksPage() {
           )}
         </div>
       </div>
+      </div>
 
       {/* Create Modal */}
       <Modal isOpen={isCreateOpen} onClose={() => setIsCreateOpen(false)} title="Нова задача" size="lg">
@@ -1417,9 +1426,9 @@ export default function TasksPage() {
       </Modal>
 
       {/* View Choice Modal */}
-      <Modal isOpen={isViewChoiceOpen} onClose={() => setIsViewChoiceOpen(false)} title="Збереження відображення" size="sm">
+      <Modal isOpen={isViewChoiceOpen} onClose={() => setIsViewChoiceOpen(false)} title="Збереження списку" size="sm">
         <p className="text-sm text-slate-600 mb-4">
-          У вас вже обрано відображення «{savedViews.find((v) => v.id === activeViewId)?.name}». Що ви хочете зробити?
+          У вас вже обрано список «{savedViews.find((v) => v.id === activeViewId)?.name}». Що ви хочете зробити?
         </p>
         <div className="flex flex-col gap-2">
           <button
@@ -1427,22 +1436,22 @@ export default function TasksPage() {
             disabled={updateViewMutation.isPending}
             className="w-full px-4 py-2 text-[13px] font-semibold text-white bg-[#e53935] rounded-[3px] hover:bg-[#c62828] transition-colors disabled:opacity-60"
           >
-            {updateViewMutation.isPending ? 'Оновлення...' : 'Оновити поточне відображення'}
+            {updateViewMutation.isPending ? 'Оновлення...' : 'Оновити поточний список'}
           </button>
           <button
             onClick={handleSaveAsNew}
             className="w-full px-4 py-2 text-[13px] font-medium text-[#1a73e8] bg-white border border-[#1a73e8] rounded-[3px] hover:bg-[#e8f0fe] transition-colors"
           >
-            Зберегти як нове відображення
+            Зберегти як новий список
           </button>
         </div>
       </Modal>
 
       {/* Save View Modal */}
-      <Modal isOpen={isSaveViewOpen} onClose={() => setIsSaveViewOpen(false)} title="Збереження відображення" size="sm">
+      <Modal isOpen={isSaveViewOpen} onClose={() => setIsSaveViewOpen(false)} title="Збереження списку" size="sm">
         <div className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">Назва відображення</label>
+            <label className="block text-sm font-medium text-slate-700 mb-1">Назва списку</label>
             <input
               type="text"
               value={saveViewName}
