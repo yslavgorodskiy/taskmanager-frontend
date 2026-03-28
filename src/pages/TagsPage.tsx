@@ -104,8 +104,8 @@ export default function TagsPage() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Tags</h1>
-          <p className="text-sm text-slate-500 mt-0.5">Label and categorize your tasks</p>
+          <h1 className="text-2xl font-bold text-slate-900">Теги</h1>
+          <p className="text-sm text-slate-500 mt-0.5">Мітки для категоризації задач</p>
         </div>
         <button
           onClick={() => setIsCreateOpen(true)}
@@ -114,7 +114,7 @@ export default function TagsPage() {
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
           </svg>
-          New Tag
+          Новий тег
         </button>
       </div>
 

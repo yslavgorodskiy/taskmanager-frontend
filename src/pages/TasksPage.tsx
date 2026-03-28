@@ -1,4 +1,4 @@
-import { useState, useMemo, useCallback, useRef } from 'react'
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm, Controller } from 'react-hook-form'
 import { tasksApi } from '../api/tasks'
@@ -8,16 +8,18 @@ import { usersApi } from '../api/users'
 import { savedViewsApi } from '../api/savedViews'
 import type { Task, TaskCreate, TaskStatus, TaskPriority, TaskUpdate, ColumnSettings, Direction, Tag, SavedViewSettings } from '../types'
 import Modal from '../components/Modal'
+import { exportToCSV, exportToExcel } from '../utils/exportTasks'
 
 // ─── Column types ────────────────────────────────────────────────────────────
 
-type ColumnKey = 'title' | 'status' | 'priority' | 'direction' | 'due_date'
+type ColumnKey = 'title' | 'description' | 'status' | 'priority' | 'direction' | 'due_date'
 type SortKey = ColumnKey
 type SortOrder = 'asc' | 'desc'
 type ColumnWidths = ColumnSettings['widths']
 
 const COLUMNS: { key: ColumnKey; label: string }[] = [
   { key: 'title', label: 'Назва' },
+  { key: 'description', label: 'Опис' },
   { key: 'status', label: 'Статус' },
   { key: 'priority', label: 'Пріоритет' },
   { key: 'direction', label: 'Напрямок' },
@@ -255,21 +257,21 @@ const PRIORITY_OPTIONS: { value: TaskPriority; label: string }[] = [
 ]
 
 const STATUS_STYLES: Record<TaskStatus, string> = {
-  new: 'bg-blue-100 text-blue-700 border border-blue-200',
-  in_progress: 'bg-amber-100 text-amber-700 border border-amber-200',
-  completed: 'bg-emerald-100 text-emerald-700 border border-emerald-200',
-  cancelled: 'bg-slate-100 text-slate-500 border border-slate-200',
+  new:         'bg-[#fff9c4] text-[#795548] border border-[#f9a825]',
+  in_progress: 'bg-[#fff3cd] text-[#856404] border border-[#ffc107]',
+  completed:   'bg-[#d4edda] text-[#155724] border border-[#28a745]',
+  cancelled:   'bg-[#f8f9fa] text-[#6c757d] border border-[#ced4da]',
 }
 
 const PRIORITY_STYLES: Record<TaskPriority, string> = {
-  low: 'bg-teal-100 text-teal-700',
-  medium: 'bg-blue-100 text-blue-700',
-  high: 'bg-orange-100 text-orange-700',
-  urgent: 'bg-red-100 text-red-700',
+  low:    'bg-[#f8f9fa] text-[#6c757d] border border-[#ced4da]',
+  medium: 'bg-[#e3f2fd] text-[#0d47a1] border border-[#90caf9]',
+  high:   'bg-[#fff3e0] text-[#e65100] border border-[#ffb74d]',
+  urgent: 'bg-[#ffebee] text-[#b71c1c] border border-[#ef9a9a]',
 }
 
 // Avatar colors for variety
-const AVATAR_COLORS = ['bg-violet-500', 'bg-amber-500', 'bg-emerald-500', 'bg-rose-500', 'bg-sky-500', 'bg-indigo-500']
+const AVATAR_COLORS = ['bg-[#e53935]', 'bg-[#1a73e8]', 'bg-[#2e7d32]', 'bg-[#f57c00]', 'bg-[#6a1b9a]', 'bg-[#00838f]']
 
 interface TaskFormData {
   title: string
@@ -338,55 +340,55 @@ function TaskForm({
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
       {apiError && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+        <div className="bg-[#ffebee] border border-[#ef9a9a] text-[#b71c1c] px-4 py-2 rounded-[3px] text-[13px]">
           {apiError.response?.data?.detail || 'Виникла помилка'}
         </div>
       )}
       <div>
-        <label className="block text-sm font-medium text-slate-700 mb-1">Назва *</label>
+        <label className="block text-[12px] font-semibold text-[#666] mb-1">Назва *</label>
         <input
           {...register('title', { required: "Назва обов'язкова" })}
-          className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="w-full px-3 py-1.5 border border-[#e0e0e0] rounded-[3px] text-[13px] focus:outline-none focus:border-[#1a73e8] transition-colors"
           placeholder="Назва задачі"
         />
         {errors.title && <p className="mt-1 text-xs text-red-600">{errors.title.message}</p>}
       </div>
       <div>
-        <label className="block text-sm font-medium text-slate-700 mb-1">Опис</label>
+        <label className="block text-[12px] font-semibold text-[#666] mb-1">Опис</label>
         <textarea
           {...register('description')}
           rows={3}
-          className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+          className="w-full px-3 py-1.5 border border-[#e0e0e0] rounded-[3px] text-[13px] focus:outline-none focus:border-[#1a73e8] transition-colors resize-none"
           placeholder="Необов'язковий опис"
         />
       </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Статус</label>
+          <label className="block text-[12px] font-semibold text-[#666] mb-1">Статус</label>
           <select {...register('status')} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
             {STATUS_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
           </select>
         </div>
         <div>
-          <label className="block text-sm font-medium text-slate-700 mb-1">Пріоритет</label>
+          <label className="block text-[12px] font-semibold text-[#666] mb-1">Пріоритет</label>
           <select {...register('priority')} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
             {PRIORITY_OPTIONS.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
           </select>
         </div>
       </div>
       <div>
-        <label className="block text-sm font-medium text-slate-700 mb-1">Дедлайн</label>
-        <input type="date" {...register('due_date')} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+        <label className="block text-[12px] font-semibold text-[#666] mb-1">Дедлайн</label>
+        <input type="date" {...register('due_date')} className="w-full px-3 py-1.5 border border-[#e0e0e0] rounded-[3px] text-[13px] focus:outline-none focus:border-[#1a73e8] transition-colors" />
       </div>
       <div>
-        <label className="block text-sm font-medium text-slate-700 mb-1">Напрямок</label>
+        <label className="block text-[12px] font-semibold text-[#666] mb-1">Напрямок</label>
         <select {...register('direction_id')} className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500">
           <option value="">— Без напрямку —</option>
           {directions.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
         </select>
       </div>
       <div>
-        <label className="block text-sm font-medium text-slate-700 mb-1">Теги</label>
+        <label className="block text-[12px] font-semibold text-[#666] mb-1">Теги</label>
         <Controller
           name="tag_ids"
           control={control}
@@ -405,8 +407,8 @@ function TaskForm({
                         field.onChange([...field.value, String(tag.id)])
                       }
                     }}
-                    className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
-                      isSelected ? 'bg-indigo-100 border-indigo-300 text-indigo-700' : 'bg-white border-slate-300 text-slate-600 hover:border-indigo-300'
+                    className={`px-3 py-1 rounded-[10px] text-[11px] font-semibold border transition-colors ${
+                      isSelected ? 'bg-[#e8eaf6] border-[#3949ab] text-[#3949ab]' : 'bg-white border-[#e0e0e0] text-[#666] hover:border-[#1a73e8]'
                     }`}
                     style={tag.color && isSelected ? { backgroundColor: tag.color + '33', borderColor: tag.color, color: tag.color } : undefined}
                   >
@@ -489,6 +491,21 @@ export default function TasksPage() {
   // Advanced filters
   const [advancedFilters, setAdvancedFilters] = useState<FilterRule[]>([])
   const [filterExpression, setFilterExpression] = useState('')
+
+  // Export dropdown
+  const [isExportOpen, setIsExportOpen] = useState(false)
+  const exportRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!isExportOpen) return
+    const handler = (e: MouseEvent) => {
+      if (exportRef.current && !exportRef.current.contains(e.target as Node)) {
+        setIsExportOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [isExportOpen])
 
   // Settings modal state
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
@@ -836,6 +853,8 @@ export default function TasksPage() {
       switch (key) {
         case 'title':
           return a.title.localeCompare(b.title, 'uk')
+        case 'description':
+          return (a.description ?? '').localeCompare(b.description ?? '', 'uk')
         case 'status':
           return STATUS_ORDER[a.status] - STATUS_ORDER[b.status]
         case 'priority':
@@ -860,6 +879,16 @@ export default function TasksPage() {
 
     return sorted
   }, [tasks, searchQuery, sortKeys, advancedFilters, filterExpression, FILTER_FIELDS])
+
+  const handleExportCSV = () => {
+    exportToCSV(filteredTasks, columnSettings.visible as ColumnKey[])
+    setIsExportOpen(false)
+  }
+
+  const handleExportExcel = () => {
+    exportToExcel(filteredTasks, columnSettings.visible as ColumnKey[])
+    setIsExportOpen(false)
+  }
 
   const activeFiltersCount = advancedFilters.length
 
@@ -944,28 +973,28 @@ export default function TasksPage() {
   return (
     <div className="flex h-full overflow-hidden">
       {/* Left filter panel */}
-      <aside className="w-56 bg-white border-r border-slate-200 flex flex-col flex-shrink-0 overflow-y-auto">
+      <aside className="w-40 bg-[#f5f5f5] border-r border-[#e0e0e0] flex flex-col flex-shrink-0 overflow-y-auto">
         <div className="flex-1 p-4 space-y-6">
           {/* Direction filter */}
           <div>
-            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Напрямок</h3>
+            <h3 className="text-[11px] font-semibold text-[#999] uppercase tracking-wide mb-2 px-3">Напрямок</h3>
             {directions.length === 0 ? (
               <p className="text-xs text-slate-400 italic">Немає напрямків</p>
             ) : (
               <div className="space-y-1.5">
                 {directions.map((dir) => (
-                  <label key={dir.id} className="flex items-center gap-2.5 cursor-pointer group">
+                  <label key={dir.id} className="flex items-center gap-2 cursor-pointer group px-3 py-1 hover:bg-[#e8e8e8] transition-colors">
                     <input
                       type="checkbox"
                       checked={advancedFilters.some((f) => f.field === 'direction' && f.op === 'equals' && f.value === String(dir.id))}
                       onChange={() => toggleDirection(dir.id)}
-                      className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                      className="w-3.5 h-3.5 rounded border-[#ccc] accent-[#1a73e8] cursor-pointer"
                     />
                     <div className="flex items-center gap-1.5 min-w-0">
                       {dir.color && (
                         <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: dir.color }} />
                       )}
-                      <span className="text-sm text-slate-700 truncate group-hover:text-slate-900">{dir.name}</span>
+                      <span className="text-[13px] text-[#333] truncate group-hover:text-[#000]">{dir.name}</span>
                     </div>
                   </label>
                 ))}
@@ -975,15 +1004,15 @@ export default function TasksPage() {
 
           {/* Status filter */}
           <div>
-            <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Статус</h3>
+            <h3 className="text-[11px] font-semibold text-[#999] uppercase tracking-wide mb-2 px-3">Статус</h3>
             <div className="space-y-1.5">
               {STATUS_OPTIONS.map((opt) => (
-                <label key={opt.value} className="flex items-center gap-2.5 cursor-pointer">
+                <label key={opt.value} className="flex items-center gap-2 cursor-pointer px-3 py-1 hover:bg-[#e8e8e8] transition-colors">
                   <input
                     type="checkbox"
                     checked={advancedFilters.some((f) => f.field === 'status' && f.op === 'equals' && f.value === opt.value)}
                     onChange={() => toggleStatus(opt.value)}
-                    className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                    className="w-3.5 h-3.5 rounded border-[#ccc] accent-[#1a73e8] cursor-pointer"
                   />
                   <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${STATUS_STYLES[opt.value]}`}>
                     {opt.label}
@@ -996,16 +1025,16 @@ export default function TasksPage() {
           {/* Saved views */}
           {savedViews.length > 0 && (
             <div>
-              <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">Збережені відображення</h3>
+              <h3 className="text-[11px] font-semibold text-[#999] uppercase tracking-wide mb-2 px-3">Збережені відображення</h3>
               <div className="space-y-1">
                 {savedViews.map((view) => (
                   <div key={view.id} className="flex items-center group">
                     <button
                       onClick={() => applyView(view)}
-                      className={`flex-1 text-left text-sm px-2 py-1.5 rounded transition-colors truncate ${
+                      className={`flex-1 text-left text-[13px] px-3 py-1.5 transition-colors truncate ${
                         activeViewId === view.id
-                          ? 'bg-indigo-50 text-indigo-700 font-medium'
-                          : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900'
+                          ? 'bg-[#ddeeff] text-[#1a73e8] font-semibold border-l-2 border-[#1a73e8] pl-[10px]'
+                          : 'text-[#333] hover:bg-[#e8e8e8]'
                       }`}
                       title={view.name}
                     >
@@ -1033,10 +1062,10 @@ export default function TasksPage() {
 
         {/* Bottom: save view button (visible only when filters are active) */}
         {hasAnyFilters && (
-          <div className="px-4 py-3 border-t border-slate-100">
+          <div className="px-3 py-3 border-t border-[#e0e0e0]">
             <button
               onClick={handleSaveViewClick}
-              className="flex items-center gap-1.5 text-xs text-indigo-600 hover:text-indigo-800 transition-colors"
+              className="flex items-center gap-1.5 text-[12px] text-[#1a73e8] hover:text-[#1557b0] transition-colors"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
@@ -1048,13 +1077,13 @@ export default function TasksPage() {
       </aside>
 
       {/* Main area */}
-      <div className="flex-1 flex flex-col overflow-hidden bg-white">
+      <div className="flex-1 flex flex-col overflow-hidden bg-white" style={{fontFamily:"'Open Sans',sans-serif"}}>
         {/* Toolbar */}
-        <div className="flex items-center gap-3 px-4 py-2.5 border-b border-slate-200 bg-white flex-shrink-0">
+        <div className="flex items-center gap-2 px-4 py-2 border-b border-[#e0e0e0] bg-white flex-shrink-0">
           {/* Create button */}
           <button
             onClick={() => setIsCreateOpen(true)}
-            className="flex items-center gap-1.5 px-4 py-1.5 bg-rose-500 text-white text-sm font-medium rounded-md hover:bg-rose-600 transition-colors flex-shrink-0 shadow-sm"
+            className="flex items-center gap-1.5 px-4 py-1.5 bg-[#e53935] text-white text-[13px] font-semibold rounded-[3px] hover:bg-[#c62828] transition-colors flex-shrink-0"
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -1071,7 +1100,7 @@ export default function TasksPage() {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Пошук задач..."
-              className="w-full pl-9 pr-3 py-1.5 border border-slate-200 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-slate-50"
+              className="w-full pl-9 pr-3 py-1.5 border border-[#e0e0e0] rounded-[3px] text-[13px] focus:outline-none focus:border-[#1a73e8] bg-[#f5f5f5] focus:bg-white transition-colors"
             />
           </div>
 
@@ -1082,8 +1111,8 @@ export default function TasksPage() {
                 onClick={openSettingsFilters}
                 className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
                   activeFiltersCount > 0
-                    ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
-                    : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'
+                    ? 'bg-[#e8f0fe] text-[#1a73e8] border border-[#1a73e8]'
+                    : 'bg-white text-[#666] border border-[#e0e0e0] hover:bg-[#f5f5f5]'
                 }`}
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1091,7 +1120,7 @@ export default function TasksPage() {
                 </svg>
                 Фільтри
                 {activeFiltersCount > 0 && (
-                  <span className="ml-0.5 px-1.5 py-0.5 bg-indigo-600 text-white rounded-full text-[10px] leading-none">{activeFiltersCount}</span>
+                  <span className="ml-0.5 px-1.5 py-0.5 bg-[#1a73e8] text-white rounded-full text-[10px] leading-none">{activeFiltersCount}</span>
                 )}
               </button>
               {activeFiltersCount > 0 && (
@@ -1108,10 +1137,49 @@ export default function TasksPage() {
             </div>
 
             {/* Record count */}
-            <span className="text-xs text-slate-400 whitespace-nowrap">
+            <span className="text-[12px] text-[#999] whitespace-nowrap">
               {filteredTasks.length} {filteredTasks.length === 1 ? 'запис' : 'записів'}
               {filteredTasks.length !== tasks.length && `, фільтр...`}
             </span>
+
+            {/* Export */}
+            <div className="relative" ref={exportRef}>
+              <button
+                onClick={() => setIsExportOpen((v) => !v)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-[3px] text-[12px] font-medium bg-white text-[#666] border border-[#e0e0e0] hover:bg-[#f5f5f5] transition-colors"
+                title="Експорт задач"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+                Експорт
+                <svg className={`w-3 h-3 transition-transform ${isExportOpen ? 'rotate-180' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              {isExportOpen && (
+                <div className="absolute right-0 mt-1 w-44 bg-white border border-[#e0e0e0] rounded shadow-lg z-50 py-1">
+                  <button
+                    onClick={handleExportCSV}
+                    className="flex items-center gap-2 w-full px-3 py-2 text-[13px] text-[#333] hover:bg-[#f5f5f5] transition-colors"
+                  >
+                    <svg className="w-4 h-4 text-emerald-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    Експорт у CSV
+                  </button>
+                  <button
+                    onClick={handleExportExcel}
+                    className="flex items-center gap-2 w-full px-3 py-2 text-[13px] text-[#333] hover:bg-[#f5f5f5] transition-colors"
+                  >
+                    <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    Експорт у Excel
+                  </button>
+                </div>
+              )}
+            </div>
 
             {/* Settings */}
             <button onClick={() => openSettings('fields')} className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors">
@@ -1127,7 +1195,7 @@ export default function TasksPage() {
         <div ref={tableContainerRef} className="flex-1 overflow-y-auto overflow-x-hidden">
           {isLoading ? (
             <div className="flex items-center justify-center h-40">
-              <div className="animate-spin rounded-full h-7 w-7 border-b-2 border-indigo-600" />
+              <div className="animate-spin rounded-full h-7 w-7 border-b-2 border-[#e53935]" />
             </div>
           ) : (
             <>
@@ -1141,7 +1209,7 @@ export default function TasksPage() {
                   <col style={{ width: 40 }} />
                 </colgroup>
                 <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50">
+                  <tr className="border-b-2 border-[#e0e0e0] bg-white">
                     <th className="px-4 py-2.5">
                       <input type="checkbox" className="w-3.5 h-3.5 rounded border-slate-300" />
                     </th>
@@ -1156,9 +1224,9 @@ export default function TasksPage() {
                           onDragOver={(e) => handleColumnDragOver(e, col.key)}
                           onDrop={() => handleColumnDrop(col.key)}
                           onDragEnd={handleColumnDragEnd}
-                          className={`relative text-left px-3 py-2.5 text-xs font-semibold uppercase tracking-wider cursor-grab select-none hover:bg-slate-100 transition-colors overflow-hidden ${
-                            sortEntry ? 'text-indigo-600' : 'text-slate-500'
-                          } ${dragOverCol === col.key ? 'bg-indigo-50 border-l-2 border-indigo-400' : ''}`}
+                          className={`relative text-left px-3 py-2 text-[11px] font-semibold uppercase tracking-wider cursor-grab select-none hover:bg-[#f5f5f5] transition-colors overflow-hidden ${
+                            sortEntry ? 'text-[#1a73e8]' : 'text-[#666]'
+                          } ${dragOverCol === col.key ? 'bg-[#e8f0fe] border-l-2 border-[#1a73e8]' : ''}`}
                           onClick={(e) => handleSort(col.key, e.shiftKey)}
                           title="Клік — сортувати, Shift+клік — додати до сортування, перетягніть — змінити порядок"
                         >
@@ -1187,7 +1255,7 @@ export default function TasksPage() {
                             onClick={(e) => e.stopPropagation()}
                             onDragStart={(e) => e.stopPropagation()}
                             draggable={false}
-                            className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-indigo-400 transition-colors z-10"
+                            className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-[#1a73e8] transition-colors z-10"
                           />
                         </th>
                       )
@@ -1198,7 +1266,7 @@ export default function TasksPage() {
                 <tbody>
                   {filteredTasks.length === 0 ? (
                     <tr>
-                      <td colSpan={visibleColCount} className="text-center py-16 text-slate-400 text-sm">
+                      <td colSpan={visibleColCount} className="text-center py-16 text-[#999] text-[13px]">
                         {tasks.length === 0 ? 'Задач ще немає. Створіть першу!' : 'Нічого не знайдено за вашими фільтрами.'}
                       </td>
                     </tr>
@@ -1209,8 +1277,8 @@ export default function TasksPage() {
                       return (
                         <tr
                           key={task.id}
-                          className={`border-b border-slate-100 hover:bg-indigo-50/40 cursor-pointer transition-colors group ${
-                            index % 2 === 0 ? 'bg-white' : 'bg-slate-50/60'
+                          className={`border-b border-[#eeeeee] hover:bg-[#f0f7ff] cursor-pointer transition-colors group ${
+                            index % 2 === 0 ? 'bg-white' : 'bg-[#fafafa]'
                           }`}
                           onClick={() => setEditingTask(task)}
                         >
@@ -1229,18 +1297,24 @@ export default function TasksPage() {
                                         <span className="text-xs font-semibold text-white">{initials}</span>
                                       </div>
                                       <div className="min-w-0 overflow-hidden">
-                                        <p className="font-medium text-slate-800 truncate">{task.title}</p>
-                                        {task.description && (
-                                          <p className="text-xs text-slate-400 truncate">{task.description}</p>
+                                        <p className="font-medium text-[#333] truncate text-[13px]">{task.title}</p>
+                                        {!isVisible('description') && task.description && (
+                                          <p className="text-[11px] text-[#999] truncate">{task.description}</p>
                                         )}
                                       </div>
                                     </div>
                                   </td>
                                 )
+                              case 'description':
+                                return (
+                                  <td key="description" className="px-3 py-2.5 overflow-hidden">
+                                    <p className="text-[13px] text-[#666] truncate">{task.description ?? ''}</p>
+                                  </td>
+                                )
                               case 'status':
                                 return (
                                   <td key="status" className="px-3 py-2.5 overflow-hidden">
-                                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium truncate ${STATUS_STYLES[task.status]}`}>
+                                    <span className={`inline-flex items-center px-2 py-0.5 rounded-[10px] text-[11px] font-semibold truncate ${STATUS_STYLES[task.status]}`}>
                                       {STATUS_OPTIONS.find((o) => o.value === task.status)?.label}
                                     </span>
                                   </td>
@@ -1248,7 +1322,7 @@ export default function TasksPage() {
                               case 'priority':
                                 return (
                                   <td key="priority" className="px-3 py-2.5 overflow-hidden">
-                                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium truncate ${PRIORITY_STYLES[task.priority]}`}>
+                                    <span className={`inline-flex items-center px-2 py-0.5 rounded-[10px] text-[11px] font-semibold truncate ${PRIORITY_STYLES[task.priority]}`}>
                                       {PRIORITY_OPTIONS.find((o) => o.value === task.priority)?.label}
                                     </span>
                                   </td>
@@ -1276,7 +1350,7 @@ export default function TasksPage() {
                                 return (
                                   <td key="due_date" className="px-3 py-2.5 overflow-hidden">
                                     {task.due_date ? (
-                                      <span className="text-xs text-slate-500 whitespace-nowrap">
+                                      <span className="text-[12px] text-[#666] whitespace-nowrap">
                                         {new Date(task.due_date).toLocaleDateString('uk-UA', { day: '2-digit', month: '2-digit', year: '2-digit' })}
                                       </span>
                                     ) : (
@@ -1293,7 +1367,7 @@ export default function TasksPage() {
                           <td className="px-2 py-2.5" onClick={(e) => e.stopPropagation()}>
                             <button
                               onClick={() => setDeletingId(task.id)}
-                              className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded transition-all"
+                              className="opacity-0 group-hover:opacity-100 p-1 text-[#bbb] hover:text-[#e53935] hover:bg-[#ffebee] rounded transition-all"
                               title="Видалити"
                             >
                               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1327,15 +1401,15 @@ export default function TasksPage() {
 
       {/* Delete Modal */}
       <Modal isOpen={deletingId !== null} onClose={() => setDeletingId(null)} title="Видалити задачу" size="sm">
-        <p className="text-slate-600 mb-4 text-sm">Ви впевнені, що хочете видалити цю задачу? Цю дію не можна скасувати.</p>
+        <p className="text-[#333] mb-4 text-[13px]">Ви впевнені, що хочете видалити цю задачу? Цю дію не можна скасувати.</p>
         <div className="flex justify-end gap-3">
-          <button onClick={() => setDeletingId(null)} className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50">
+          <button onClick={() => setDeletingId(null)} className="px-4 py-1.5 text-[13px] font-medium text-[#333] bg-white border border-[#e0e0e0] rounded-[3px] hover:bg-[#f5f5f5]">
             Скасувати
           </button>
           <button
             onClick={() => deletingId !== null && deleteMutation.mutate(deletingId)}
             disabled={deleteMutation.isPending}
-            className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-60"
+            className="px-4 py-1.5 text-[13px] font-semibold text-white bg-[#e53935] rounded-[3px] hover:bg-[#c62828] disabled:opacity-60"
           >
             {deleteMutation.isPending ? 'Видалення...' : 'Видалити'}
           </button>
@@ -1351,13 +1425,13 @@ export default function TasksPage() {
           <button
             onClick={handleUpdateCurrentView}
             disabled={updateViewMutation.isPending}
-            className="w-full px-4 py-2.5 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-60"
+            className="w-full px-4 py-2 text-[13px] font-semibold text-white bg-[#e53935] rounded-[3px] hover:bg-[#c62828] transition-colors disabled:opacity-60"
           >
             {updateViewMutation.isPending ? 'Оновлення...' : 'Оновити поточне відображення'}
           </button>
           <button
             onClick={handleSaveAsNew}
-            className="w-full px-4 py-2.5 text-sm font-medium text-indigo-600 bg-white border border-indigo-300 rounded-lg hover:bg-indigo-50 transition-colors"
+            className="w-full px-4 py-2 text-[13px] font-medium text-[#1a73e8] bg-white border border-[#1a73e8] rounded-[3px] hover:bg-[#e8f0fe] transition-colors"
           >
             Зберегти як нове відображення
           </button>
@@ -1375,21 +1449,21 @@ export default function TasksPage() {
               onChange={(e) => setSaveViewName(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') handleSaveView() }}
               placeholder="Введіть назву..."
-              className="w-full px-3 py-2 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+              className="w-full px-3 py-1.5 text-[13px] border border-[#e0e0e0] rounded-[3px] focus:border-[#1a73e8] outline-none transition-colors"
               autoFocus
             />
           </div>
           <div className="flex justify-end gap-3">
             <button
               onClick={() => setIsSaveViewOpen(false)}
-              className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+              className="px-4 py-1.5 text-[13px] font-medium text-[#333] bg-white border border-[#e0e0e0] rounded-[3px] hover:bg-[#f5f5f5] transition-colors"
             >
               Скасувати
             </button>
             <button
               onClick={handleSaveView}
               disabled={!saveViewName.trim() || createViewMutation.isPending}
-              className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-60"
+              className="px-4 py-1.5 text-[13px] font-semibold text-white bg-[#e53935] rounded-[3px] hover:bg-[#c62828] transition-colors disabled:opacity-60"
             >
               {createViewMutation.isPending ? 'Збереження...' : 'Зберегти'}
             </button>
@@ -1409,10 +1483,10 @@ export default function TasksPage() {
               <button
                 key={tab.id}
                 onClick={() => setSettingsTab(tab.id)}
-                className={`text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                className={`text-left px-3 py-2 rounded-[3px] text-[13px] transition-colors ${
                   settingsTab === tab.id
-                    ? 'bg-indigo-50 text-indigo-700'
-                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-800'
+                    ? 'bg-[#e8f0fe] text-[#1a73e8] font-semibold'
+                    : 'text-[#666] hover:bg-[#f5f5f5] hover:text-[#333]'
                 }`}
               >
                 {tab.label}
@@ -1425,7 +1499,7 @@ export default function TasksPage() {
             {/* ── Поля tab ── */}
             {settingsTab === 'fields' && (
               <div>
-                <p className="text-sm text-slate-500 mb-4">Оберіть, які стовпці відображати, та вкажіть їхню ширину (px). Перетягніть для зміни порядку.</p>
+                <p className="text-[13px] text-[#666] mb-4">Оберіть, які стовпці відображати, та вкажіть їхню ширину (px). Перетягніть для зміни порядку.</p>
                 <div className="space-y-1">
                   <div className="grid grid-cols-[20px_auto_1fr_80px_80px] gap-3 px-3 py-1.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">
                     <div />
@@ -1480,7 +1554,7 @@ export default function TasksPage() {
             {/* ── Фільтри tab ── */}
             {settingsTab === 'filters' && (
               <div>
-                <p className="text-sm text-slate-500 mb-4">Додайте фільтри та вкажіть вираз для їх комбінування (напр. <code className="bg-slate-100 px-1 rounded">(1 та 2) або 3</code>).</p>
+                <p className="text-[13px] text-[#666] mb-4">Додайте фільтри та вкажіть вираз для їх комбінування (напр. <code className="bg-slate-100 px-1 rounded">(1 та 2) або 3</code>).</p>
 
                 {/* Filter list */}
                 <div className="space-y-2 mb-4">
@@ -1582,7 +1656,7 @@ export default function TasksPage() {
                 {/* Add filter button */}
                 <button
                   onClick={addDraftFilter}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-medium text-[#1a73e8] hover:bg-[#e8f0fe] rounded-[3px] transition-colors"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
@@ -1615,13 +1689,13 @@ export default function TasksPage() {
         <div className="flex justify-end gap-3 pt-4 mt-4 border-t border-slate-100">
           <button
             onClick={() => setIsSettingsOpen(false)}
-            className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 transition-colors"
+            className="px-4 py-1.5 text-[13px] font-medium text-[#333] bg-white border border-[#e0e0e0] rounded-[3px] hover:bg-[#f5f5f5] transition-colors"
           >
             Скасувати
           </button>
           <button
             onClick={applySettings}
-            className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors"
+            className="px-4 py-1.5 text-[13px] font-semibold text-white bg-[#e53935] rounded-[3px] hover:bg-[#c62828] transition-colors"
           >
             Застосувати
           </button>
